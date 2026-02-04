@@ -1,0 +1,15 @@
+[project]
+name = "korea-realestate-abm"
+version = "0.1.0"
+description = "한국 부동산 시장 Agent-Based Model 시뮬레이션"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "matplotlib>=3.10.8",
+    "numpy>=2.4.2",
+    "pandas>=3.0.0",
+    "taichi>=1.7.4",
+]
+
+[project.scripts]
+realestate-sim = "main:main"
