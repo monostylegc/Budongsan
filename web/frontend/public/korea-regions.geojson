@@ -1,0 +1,161 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "id": 0,
+        "name": "강남3구",
+        "name_en": "Gangnam"
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [127.047, 37.517]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "id": 1,
+        "name": "마용성",
+        "name_en": "Mapo-Yongsan"
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [127.010, 37.556]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "id": 2,
+        "name": "기타서울",
+        "name_en": "Other Seoul"
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [126.977, 37.570]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "id": 3,
+        "name": "분당판교",
+        "name_en": "Bundang-Pangyo"
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [127.105, 37.359]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "id": 4,
+        "name": "경기남부",
+        "name_en": "South Gyeonggi"
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [127.009, 37.275]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "id": 5,
+        "name": "경기북부",
+        "name_en": "North Gyeonggi"
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [127.047, 37.742]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "id": 6,
+        "name": "인천",
+        "name_en": "Incheon"
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [126.705, 37.456]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "id": 7,
+        "name": "부산",
+        "name_en": "Busan"
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [129.076, 35.180]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "id": 8,
+        "name": "대구",
+        "name_en": "Daegu"
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [128.602, 35.871]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "id": 9,
+        "name": "광주",
+        "name_en": "Gwangju"
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [126.851, 35.160]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "id": 10,
+        "name": "대전",
+        "name_en": "Daejeon"
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [127.385, 36.351]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "id": 11,
+        "name": "세종",
+        "name_en": "Sejong"
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [127.289, 36.480]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "id": 12,
+        "name": "기타지방",
+        "name_en": "Other Regions"
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [127.800, 35.800]
+      }
+    }
+  ]
+}

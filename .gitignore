@@ -8,3 +8,8 @@ wheels/
 
 # Virtual environments
 .venv
+
+.env
+
+# Node modules
+node_modules/

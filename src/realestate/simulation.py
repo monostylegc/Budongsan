@@ -1,4 +1,4 @@
-"""시뮬레이션 메인 루프"""
+"""시뮬레이션 메인 루프 - 행동경제학 기반 한국 부동산 ABM"""
 
 import taichi as ti
 import numpy as np
@@ -9,6 +9,8 @@ from .config import Config, PolicyConfig, NUM_REGIONS, REGIONS
 from .agents import Households
 from .houses import Houses
 from .market import Market
+from .macro import MacroModel
+from .supply import SupplyModel
 
 
 class Simulation:
@@ -37,15 +39,26 @@ class Simulation:
         self.houses = Houses(self.config)
         self.market = Market(self.config)
 
+        # 거시경제 및 공급 모델
+        self.macro = MacroModel(self.config)
+        self.supply = SupplyModel(self.config)
+
         # 상태
         self.current_step = 0
         self.initialized = False
 
         # 정책 파라미터 (Taichi field)
         self.ltv_limits = ti.field(dtype=ti.f32, shape=3)
+        self.acq_tax_rates = ti.field(dtype=ti.f32, shape=3)  # 취득세율 (똘똘한 한채 정책)
+
+        # 거래 모드 설정 (True: Double Auction, False: Enhanced Matching)
+        self.use_double_auction = True
 
         # 통계
         self.stats_history = []
+        self.macro_history = []
+        self.supply_history = []
+        self.demolition_history = []
 
     def initialize(self):
         """초기화"""
@@ -68,12 +81,20 @@ class Simulation:
         print("초기화 완료")
 
     def _match_initial_ownership(self):
-        """초기 소유권 매칭"""
+        """초기 소유권 매칭
+
+        수정 (2024): 다주택자가 타지역 주택을 소유할 수 있도록 개선
+        - 1주택자: 거주 지역에 주택 소유
+        - 다주택자: 첫 번째 주택은 거주 지역, 추가 주택은 투자 가치 높은 지역에 소유 가능
+        - 투자자/투기자: 핵심 지역(강남, 마용성, 분당) 주택 소유 확률 증가
+        """
         owned_houses = self.households.owned_houses.to_numpy()
         regions = self.households.region.to_numpy()
+        agent_types = self.households.agent_type.to_numpy()
 
         house_regions = self.houses.region.to_numpy()
         house_owners = self.houses.owner_id.to_numpy()
+        house_prices = self.houses.price.to_numpy()
 
         # 지역별로 주택 인덱스 정리
         region_houses = {r: [] for r in range(NUM_REGIONS)}
@@ -81,20 +102,67 @@ class Simulation:
             if house_owners[i] == -1:
                 region_houses[r].append(i)
 
+        # 투자 가치가 높은 지역 (다주택자 추가 주택 소유 대상)
+        # 강남(0), 마용성(1), 분당(3), 기타서울(2) 순
+        investment_regions = [0, 1, 3, 2]
+
+        # 투자 지역 선택 확률 (투자자/투기자 vs 실수요자)
+        investment_region_probs_investor = np.array([0.35, 0.25, 0.20, 0.20])  # 강남 선호
+        investment_region_probs_normal = np.array([0.15, 0.20, 0.25, 0.40])    # 분산 투자
+
         # 가구별로 주택 할당
         for hh_id in range(len(owned_houses)):
             n_owned = owned_houses[hh_id]
             if n_owned == 0:
                 continue
 
-            region = regions[hh_id]
-            available = region_houses[region]
+            home_region = regions[hh_id]
+            agent_type = agent_types[hh_id]
 
-            for _ in range(min(n_owned, len(available))):
-                if not available:
-                    break
-                house_id = available.pop()
+            # 첫 번째 주택: 거주 지역
+            if len(region_houses[home_region]) > 0:
+                house_id = region_houses[home_region].pop()
                 house_owners[house_id] = hh_id
+                remaining = n_owned - 1
+            else:
+                remaining = n_owned
+
+            # 추가 주택: 다주택자의 경우 타지역 투자
+            for _ in range(remaining):
+                target_region = None
+
+                if agent_type in [1, 2]:  # 투자자 또는 투기자
+                    # 투자 지역에서 선택 (강남 선호)
+                    probs = investment_region_probs_investor
+                else:
+                    # 실수요자는 거주 지역 우선, 없으면 투자 지역
+                    if len(region_houses[home_region]) > 0:
+                        target_region = home_region
+                    else:
+                        probs = investment_region_probs_normal
+
+                # 투자 지역에서 선택
+                if target_region is None:
+                    # 확률에 따라 투자 지역 선택
+                    cumprob = 0.0
+                    roll = self.rng.random()
+                    for idx, inv_region in enumerate(investment_regions):
+                        cumprob += probs[idx]
+                        if roll < cumprob and len(region_houses[inv_region]) > 0:
+                            target_region = inv_region
+                            break
+
+                    # 투자 지역에 남은 주택이 없으면 아무 지역이나
+                    if target_region is None:
+                        for r in range(NUM_REGIONS):
+                            if len(region_houses[r]) > 0:
+                                target_region = r
+                                break
+
+                # 주택 할당
+                if target_region is not None and len(region_houses[target_region]) > 0:
+                    house_id = region_houses[target_region].pop()
+                    house_owners[house_id] = hh_id
 
         self.houses.owner_id.from_numpy(house_owners.astype(np.int32))
 
@@ -107,76 +175,215 @@ class Simulation:
             policy.ltv_3house
         ], dtype=np.float32))
 
+        # 취득세율 (똘똘한 한채 정책의 핵심)
+        # 다주택자 취득세가 8-12%로 높아 추가 매수 억제
+        # → 1주택자들이 프리미엄 지역에 집중 → 자연스러운 프리미엄 형성
+        self.acq_tax_rates.from_numpy(np.array([
+            policy.acq_tax_1house,   # 1주택: 1%
+            policy.acq_tax_2house,   # 2주택: 8%
+            policy.acq_tax_3house    # 3주택+: 12%
+        ], dtype=np.float32))
+
     def step(self):
-        """한 스텝 실행 (1개월)"""
+        """한 스텝 실행 (1개월)
+
+        행동경제학 요소:
+        - Prospect Theory (전망이론)
+        - Hyperbolic Discounting (준쌍곡선 할인)
+        - DeGroot Learning (네트워크 학습)
+        - FOMO, 손실회피, 앵커링, 군집행동
+
+        거시경제 연동:
+        - Taylor Rule 금리
+        - GDP-소득 연동
+        - 전월세 전환
+
+        내생적 공급:
+        - 가격 연동 신규 공급
+        - 재건축
+        """
         if not self.initialized:
             raise RuntimeError("시뮬레이션이 초기화되지 않았습니다. initialize()를 먼저 호출하세요.")
 
         policy = self.config.policy
+        pt_cfg = self.config.prospect_theory
+        net_cfg = self.config.network
 
-        # 0. 사회적 신호 업데이트 (행동경제학 요소용)
+        # === Phase 0: 거시경제 업데이트 ===
+        # 가격 변화율 계산
+        price_changes = self.market.region_price_changes.to_numpy()
+        avg_price_change = np.mean(price_changes) if len(price_changes) > 0 else 0.0
+
+        # Taylor Rule 금리 및 GDP 업데이트
+        self.macro.step(avg_price_change, self.rng)
+        current_mortgage_rate = self.macro.get_mortgage_rate()
+        income_growth = self.macro.get_income_growth()
+
+        # === Phase 1: 사회적 신호 및 네트워크 업데이트 ===
         trans_history = self.market.transaction_history if len(self.market.transaction_history) > 0 else []
-        self.households.update_social_signals(self.market, np.array(trans_history[-6:] if len(trans_history) >= 6 else trans_history))
-
-        # 1. 기대 업데이트
-        self.households.update_expectations(
-            self.market.region_price_changes,
-            social_weight=0.1
+        self.households.update_social_signals(
+            self.market,
+            np.array(trans_history[-6:] if len(trans_history) >= 6 else trans_history)
         )
 
-        # 2. 매수/매도 의사결정
+        # DeGroot Learning (네트워크 기반 신념 업데이트)
+        self.households.update_network_beliefs()
+
+        # === Phase 1.5: 가격 적정성 지표 업데이트 (구조적 개선) ===
+        self.market.update_price_metrics(self.households)
+
+        # === Phase 1.6: 지역 선택 (구조적 개선) ===
+        # 에이전트 유형별로 목표 지역 결정 (실수요자/투자자/투기자)
+        self.households.select_target_regions(self.market, self.rng)
+
+        # === Phase 2: 기대 업데이트 ===
+        self.households.update_expectations(
+            self.market.region_price_changes,
+            social_weight=self.config.behavioral.social_learning_rate
+        )
+
+        # 참조 가격 업데이트 (Prospect Theory)
+        self.households.update_reference_price(
+            self.market.region_prices,
+            pt_cfg.reference_point_decay
+        )
+
+        # === Phase 3: 매수/매도 의사결정 (Prospect Theory + Hyperbolic Discounting) ===
+        # 취득세 정책이 "똘똘한 한채" 현상의 핵심 원인
         self.households.decide_buy_sell(
             self.market.region_prices,
             self.ltv_limits,
+            self.acq_tax_rates,  # 취득세율 (다주택 억제 정책)
             policy.dti_limit,
-            policy.interest_rate + policy.mortgage_spread,
+            current_mortgage_rate,  # 동적 금리 적용
             self.config.buy_threshold,
             self.config.sell_threshold,
             policy.transfer_tax_multi_long,
             policy.jongbu_rate,
-            policy.jongbu_threshold_multi
+            policy.jongbu_threshold_multi,
+            # Prospect Theory 파라미터
+            pt_cfg.alpha,
+            pt_cfg.beta,
+            pt_cfg.gamma_gain,
+            pt_cfg.gamma_loss
         )
 
-        # 3. 매물 등록 (매도 희망자의 주택을 매물로)
+        # 정보 캐스케이드 적용 (네트워크 효과)
+        self.households.apply_information_cascade(
+            net_cfg.cascade_threshold,
+            net_cfg.cascade_multiplier
+        )
+
+        # === Phase 4: 매물 등록 ===
         self._register_listings()
 
-        # 4. 수요/공급 집계
+        # === Phase 5: 수요/공급 집계 ===
         self.market.count_demand_supply(self.households, self.houses)
 
-        # 5. 매칭 (거래) - 매입가 기록 포함
-        self.market.enhanced_matching(self.households, self.houses, self.rng, self.current_step)
+        # === Phase 6: 거래 매칭 ===
+        if self.use_double_auction:
+            # Double Auction 기반 거래
+            self.market.double_auction_matching(
+                self.households, self.houses, self.rng, self.current_step
+            )
+        else:
+            # 기존 향상된 매칭
+            self.market.enhanced_matching(
+                self.households, self.houses, self.rng, self.current_step
+            )
 
-        # 6. 가격 업데이트
+        # === Phase 7: 가격 업데이트 ===
         self.market.update_prices(
             self.houses,
             self.config.price_sensitivity,
             self.config.expectation_weight
         )
 
-        # 7. 가격 집계 및 이력 업데이트
+        # === Phase 8: 가격 집계 및 이력 업데이트 ===
         self.market.aggregate_prices(self.houses)
         self.houses.update_price_history()
 
-        # 8. 무주택 기간 업데이트
+        # === Phase 9: 전월세 전환 ===
+        conversion_rate = self.macro.get_jeonse_conversion_rate()
+        self.market.update_jeonse_wolse_conversion(
+            self.houses, self.households, conversion_rate, self.rng
+        )
+        self.houses.update_jeonse_wolse(conversion_rate, self.rng)
+
+        # === Phase 10: 공급 업데이트 ===
+        if self.current_step >= 12:
+            # 12개월 및 5년 가격 변화율 계산
+            price_history = self.market.price_history
+            if len(price_history) >= 12:
+                prices_12m_ago = price_history[-12]
+                prices_now = self.market.region_prices.to_numpy()
+                price_changes_12m = (prices_now - prices_12m_ago) / (prices_12m_ago + 1e-6)
+            else:
+                price_changes_12m = np.zeros(NUM_REGIONS, dtype=np.float32)
+
+            if len(price_history) >= 60:
+                prices_5y_ago = price_history[-60]
+                price_history_5y = (prices_now - prices_5y_ago) / (prices_5y_ago + 1e-6)
+            else:
+                price_history_5y = np.zeros(NUM_REGIONS, dtype=np.float32)
+
+            current_stock = self.houses.get_active_count_by_region()
+
+            supply_stats = self.supply.step(
+                self.houses,
+                price_changes_12m,
+                price_history_5y,
+                current_stock,
+                self.current_step,
+                self.rng
+            )
+            self.supply_history.append(supply_stats)
+
+        # === Phase 10.5: 건물 노후화 업데이트 (매월) ===
+        self.houses.update_depreciation()
+
+        # === Phase 10.6: 멸실 처리 ===
+        # 자연 멸실 (노후 건물)
+        natural_demolished = self.houses.check_natural_demolition(self.rng)
+        natural_stats = self.houses.process_demolitions(natural_demolished, self.households)
+
+        # 재해 멸실 (화재, 자연재해 등)
+        disaster_demolished = self.houses.check_disaster_demolition(self.rng)
+        disaster_stats = self.houses.process_demolitions(disaster_demolished, self.households)
+
+        # 멸실 통계 기록
+        demolition_stats = {
+            'step': self.current_step,
+            'natural_count': natural_stats['count'],
+            'disaster_count': disaster_stats['count'],
+            'total_count': natural_stats['count'] + disaster_stats['count'],
+            'owners_affected': natural_stats['owners_affected'] + disaster_stats['owners_affected'],
+            'tenants_affected': natural_stats['tenants_affected'] + disaster_stats['tenants_affected'],
+        }
+        demolition_stats.update(self.houses.get_condition_stats())
+        self.demolition_history.append(demolition_stats)
+
+        # === Phase 11: 무주택 기간 업데이트 ===
         self.households.update_homeless_months()
 
-        # 9. 자산 업데이트 (저축, 소득 성장)
+        # === Phase 12: 자산 업데이트 (GDP 연동 소득 성장) ===
         self.households.update_assets(
-            income_growth=0.03,  # 연 3% 소득 성장
-            savings_rate=0.1    # 소득의 10% 저축
+            income_growth=income_growth * 12,  # 월간 → 연간
+            savings_rate=0.1
         )
 
-        # 10. 연간 업데이트 (1월에)
+        # === Phase 13: 연간 업데이트 (1월에) ===
         if self.current_step % 12 == 0 and self.current_step > 0:
             self.houses.update_building_age()
             self.households.update_yearly_aging()
 
-        # 11. 생애 이벤트 (결혼, 출산 등) - 매월
+        # === Phase 14: 생애 이벤트 ===
         self.households.update_life_events(self.rng, self.current_step)
 
-        # 12. 이력 기록
+        # === Phase 15: 이력 기록 ===
         self.market.record_history()
         self._record_stats()
+        self.macro_history.append(self.macro.get_state_dict())
 
         self.current_step += 1
 
@@ -272,6 +479,14 @@ class Simulation:
             demand_supply_ratio = 0.0
         stats["demand_supply_ratio"] = float(demand_supply_ratio)
 
+        # 건물 상태 통계
+        condition_stats = self.houses.get_condition_stats()
+        stats["mean_building_condition"] = condition_stats['mean_condition']
+        stats["mean_building_age"] = condition_stats['mean_age']
+        stats["old_buildings_30y"] = condition_stats['old_buildings_30y']
+        stats["active_houses"] = condition_stats['active_count']
+        stats["demolished_houses"] = condition_stats['demolished_count']
+
         self.stats_history.append(stats)
 
     def run(self, steps: Optional[int] = None, verbose: bool = True):
@@ -306,7 +521,11 @@ class Simulation:
             "price_history": np.array(self.market.price_history),
             "transaction_history": np.array(self.market.transaction_history),
             "jeonse_ratio_history": np.array(self.market.jeonse_ratio_history),
+            "bid_ask_spread_history": np.array(self.market.bid_ask_spread_history),
             "stats_history": self.stats_history,
+            "macro_history": self.macro_history,
+            "supply_history": self.supply_history,
+            "demolition_history": self.demolition_history,
             "regions": REGIONS,
         }
 
@@ -326,5 +545,19 @@ class Simulation:
         self.market.price_history.clear()
         self.market.transaction_history.clear()
         self.market.jeonse_ratio_history.clear()
+        self.market.bid_ask_spread_history.clear()
         self.stats_history.clear()
+        self.macro_history.clear()
+        self.supply_history.clear()
+        self.demolition_history.clear()
+        self.macro.reset()
+        self.supply.reset()
         self.initialized = False
+
+    def set_use_double_auction(self, enabled: bool):
+        """Double Auction 거래 모드 설정
+
+        Args:
+            enabled: True면 Double Auction, False면 Enhanced Matching
+        """
+        self.use_double_auction = enabled
