@@ -158,11 +158,30 @@ class Market:
         ], dtype=np.float32)
 
         # 수요/공급 균형에 따른 기본 상승률 조정
-        # ds_ratio < 0.8: 공급과잉 → 기본 상승률 0
+        # ds_ratio < 0.8: 공급과잉 → 기본 상승률 축소 (but not zero)
         # ds_ratio 0.8~1.2: 균형 → 기본 상승률 비례 적용
         # ds_ratio > 1.2: 수요과잉 → 기본 상승률 100%
         appreciation_factor = np.clip((ds_ratio - 0.8) / 0.4, 0.0, 1.0)
         regional_appreciation = base_appreciation * tier_multipliers * appreciation_factor
+
+        # ================================================================
+        # 인플레이션 기대 효과 (2026-02-06 추가)
+        # ================================================================
+        # 현실에서 주택 가격은 인플레이션 기대로 인해 쉽게 하락하지 않음
+        # 프리미엄 지역(tier 1-2)은 특히 자산 보존 목적으로 수요가 유지됨
+        # 최소 상승률: 인플레이션율(약 2%/년 = 0.17%/월)의 일정 비율
+        # ================================================================
+        inflation_expectation = 0.0017  # 월 0.17% (연 2%)
+
+        # tier별 인플레이션 기대 효과 (프리미엄 지역이 더 강함)
+        inflation_factor = np.array([
+            0.8, 0.7, 0.5,  # 서울 (강남, 마용성, 기타서울)
+            0.6, 0.4, 0.3, 0.4,  # 수도권
+            0.3, 0.2, 0.2, 0.2, 0.3,  # 지방광역시
+            0.1,  # 기타지방
+        ], dtype=np.float32)
+
+        regional_appreciation = regional_appreciation + inflation_expectation * inflation_factor
 
         # === 5. 가격 수준 피드백 (평균 회귀 경향) ===
         # 평균 대비 과도하게 높은 가격은 상승 압력 감소
