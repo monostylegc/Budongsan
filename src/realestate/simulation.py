@@ -48,7 +48,7 @@ class Simulation:
         self.initialized = False
 
         # 정책 파라미터 (Taichi field)
-        self.ltv_limits = ti.field(dtype=ti.f32, shape=3)
+        self.ltv_limits = ti.field(dtype=ti.f32, shape=4)  # [무주택, 1주택, 2주택, 3주택+]
         self.acq_tax_rates = ti.field(dtype=ti.f32, shape=3)  # 취득세율 (똘똘한 한채 정책)
 
         # 거래 모드 설정 (True: Double Auction, False: Enhanced Matching)
@@ -169,10 +169,13 @@ class Simulation:
     def _update_policy_fields(self):
         """정책 파라미터를 Taichi field로 복사"""
         policy = self.config.policy
+        # LTV 한도: [무주택자, 1주택자, 2주택자, 3주택자+]
+        # 인덱스 = 현재 보유 주택 수
         self.ltv_limits.from_numpy(np.array([
-            policy.ltv_1house,
-            policy.ltv_2house,
-            policy.ltv_3house
+            policy.ltv_first_time,  # 무주택자 (생애최초 70%)
+            policy.ltv_1house,      # 1주택자 (50%)
+            policy.ltv_2house,      # 2주택자 (30%)
+            policy.ltv_3house       # 3주택자+ (0%)
         ], dtype=np.float32))
 
         # 취득세율 (똘똘한 한채 정책의 핵심)
@@ -248,8 +251,15 @@ class Simulation:
             pt_cfg.reference_point_decay
         )
 
-        # === Phase 3: 매수/매도 의사결정 (Prospect Theory + Hyperbolic Discounting) ===
+        # === Phase 3: 매수/매도 의사결정 (Prospect Theory + Hyperbolic Discounting + DSR) ===
         # 취득세 정책이 "똘똘한 한채" 현상의 핵심 원인
+        aff_cfg = policy.affordability
+
+        # 고자산가 기준 계산 (상위 10% - 실제 한국 데이터 기준)
+        # 데이터: 상위 10% 순자산 10.5억+ (전체 자산의 44.4% 점유)
+        assets_np = self.households.asset.to_numpy()
+        wealthy_threshold = float(np.percentile(assets_np, 90))
+
         self.households.decide_buy_sell(
             self.market.region_prices,
             self.ltv_limits,
@@ -265,7 +275,18 @@ class Simulation:
             pt_cfg.alpha,
             pt_cfg.beta,
             pt_cfg.gamma_gain,
-            pt_cfg.gamma_loss
+            pt_cfg.gamma_loss,
+            # DSR 기반 affordability 파라미터 (통일 체계)
+            aff_cfg.dsr_limit_end_user,
+            aff_cfg.dsr_limit_investor,
+            aff_cfg.dsr_limit_speculator,
+            aff_cfg.normal_asset_utilization,
+            aff_cfg.wealthy_asset_utilization,
+            aff_cfg.homeless_asset_utilization,  # 무주택자 자산 활용률 (85%)
+            aff_cfg.loan_term_years,
+            1 if aff_cfg.allow_stretched_dsr else 0,
+            aff_cfg.stretched_dsr_multiplier,
+            wealthy_threshold
         )
 
         # 정보 캐스케이드 적용 (네트워크 효과)
