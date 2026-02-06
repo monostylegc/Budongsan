@@ -1,523 +1,331 @@
-"""다양한 시나리오 시뮬레이션 실행
+"""2026년 한국 부동산 시장 시뮬레이션
 
-에이전트 성향의 이질성(표준편차)을 반영한 시뮬레이션
+현재 한국 상황 기반 시나리오 분석:
+- 기준금리 2.5% (한국은행 2026.01 동결)
+- GDP 성장률 ~1.5% (2025 1.0%, 2026 1.8%)
+- 실업률 ~2.6%
+- 서울 아파트 평균 15억 (2025.12 기준)
+- 수도권 규제지역 LTV 40%, DSR 40%
+- 2주택 이상 규제지역 대출 금지
+- 가계부채/GDP ~90%
+
+가구/주택 비율: 실제 한국 2,300만 가구 : 1,890만 호 = 1:100 축소
 """
 
 import numpy as np
 import matplotlib.pyplot as plt
-from dataclasses import dataclass, field
-from typing import Dict, List, Any
-import json
-from pathlib import Path
+import time
+from typing import Dict, Any
 
-# 한글 폰트 설정
+# 한글 폰트
 plt.rcParams['font.family'] = 'Malgun Gothic'
 plt.rcParams['axes.unicode_minus'] = False
 
 from src.realestate import Simulation, Config
 
-
-def print_agent_heterogeneity(sim: Simulation):
-    """에이전트 이질성 통계 출력"""
-    print("\n=== 에이전트 이질성 (표준편차) 확인 ===")
-
-    # 손실 회피 계수
-    loss_aversion = sim.households.loss_aversion.to_numpy()
-    print(f"손실회피계수 (λ): mean={loss_aversion.mean():.3f}, std={loss_aversion.std():.3f}, "
-          f"range=[{loss_aversion.min():.2f}, {loss_aversion.max():.2f}]")
-
-    # 현재 편향 (β)
-    discount_beta = sim.households.discount_beta.to_numpy()
-    print(f"현재편향 (β): mean={discount_beta.mean():.3f}, std={discount_beta.std():.3f}, "
-          f"range=[{discount_beta.min():.2f}, {discount_beta.max():.2f}]")
-
-    # 기하 할인율 (δ)
-    discount_delta = sim.households.discount_delta.to_numpy()
-    print(f"기하할인율 (δ): mean={discount_delta.mean():.4f}, std={discount_delta.std():.4f}, "
-          f"range=[{discount_delta.min():.3f}, {discount_delta.max():.3f}]")
-
-    # FOMO 민감도
-    fomo = sim.households.fomo_sensitivity.to_numpy()
-    print(f"FOMO 민감도: mean={fomo.mean():.3f}, std={fomo.std():.3f}, "
-          f"range=[{fomo.min():.2f}, {fomo.max():.2f}]")
-
-    # 군집 성향
-    herding = sim.households.herding_tendency.to_numpy()
-    print(f"군집성향: mean={herding.mean():.3f}, std={herding.std():.3f}, "
-          f"range=[{herding.min():.2f}, {herding.max():.2f}]")
-
-    # 위험 허용도
-    risk = sim.households.risk_tolerance.to_numpy()
-    print(f"위험허용도: mean={risk.mean():.3f}, std={risk.std():.3f}, "
-          f"range=[{risk.min():.2f}, {risk.max():.2f}]")
-
-    # 가격 기대
-    expectation = sim.households.price_expectation.to_numpy()
-    print(f"가격기대: mean={expectation.mean():.3f}, std={expectation.std():.3f}, "
-          f"range=[{expectation.min():.2f}, {expectation.max():.2f}]")
-
-    # 에이전트 유형 분포
-    agent_type = sim.households.agent_type.to_numpy()
-    print(f"\n에이전트 유형: 실수요자 {(agent_type==0).sum()/len(agent_type)*100:.1f}%, "
-          f"투자자 {(agent_type==1).sum()/len(agent_type)*100:.1f}%, "
-          f"투기자 {(agent_type==2).sum()/len(agent_type)*100:.1f}%")
+# ─────────────────────────────────────────────────────────
+# 실제 한국 비율 (1:770 축소, 주택보급률 82% 유지)
+# 총 가구 2,300만 → 30,000  |  주택 1,890만 → 24,600
+# ─────────────────────────────────────────────────────────
+N_HOUSEHOLDS = 30_000
+N_HOUSES = 24_600
+STEPS = 60  # 5년 (2026~2030)
+ARCH = "cuda"
 
 
-def run_baseline_scenario(steps: int = 60) -> Dict[str, Any]:
-    """기본 시나리오 실행"""
-    print("\n" + "="*60)
-    print("시나리오 1: 기본 (Baseline)")
-    print("="*60)
-
+def make_korea_2026_config(seed=42) -> Config:
+    """2026년 현재 한국 경제 상황 반영 Config 생성"""
     config = Config(
-        num_households=100_000,  # 테스트용 축소
-        num_houses=50_000,
-        num_steps=steps,
-        seed=42
+        num_households=N_HOUSEHOLDS,
+        num_houses=N_HOUSES,
+        num_steps=STEPS,
+        seed=seed,
     )
 
-    sim = Simulation(config, arch="vulkan")
-    sim.initialize()
+    # ── 거시경제: 저성장 기조 ──
+    config.macro.gdp_growth_mean = 0.015       # 연 1.5% (2026 전망)
+    config.macro.initial_gdp_growth = 0.015
+    config.macro.neutral_real_rate = 0.01       # 중립 실질금리 1%
+    config.macro.initial_inflation = 0.025      # 인플레이션 2.5%
 
-    # 이질성 확인
-    print_agent_heterogeneity(sim)
+    # ── 금리: 인하 사이클 마무리 ──
+    config.policy.interest_rate = 0.025         # 기준금리 2.5%
+    config.policy.mortgage_spread = 0.01        # 스프레드 1% → 주담대 3.5%
 
-    # 실행
-    results = sim.run(steps=steps, verbose=True)
+    # ── 대출규제: 수도권 규제 강화 ──
+    config.policy.ltv_first_time = 0.70         # 생애최초 70%
+    config.policy.ltv_1house = 0.40             # 1주택자 40% (규제지역)
+    config.policy.ltv_2house = 0.00             # 2주택 대출 금지
+    config.policy.ltv_3house = 0.00             # 3주택 대출 금지
+    config.policy.dti_limit = 0.40              # DTI 40%
+    config.policy.dsr_limit = 0.40              # DSR 40%
+
+    # ── 세금: 현행 유지 ──
+    config.policy.acq_tax_1house = 0.01         # 취득세 1%
+    config.policy.acq_tax_2house = 0.08         # 2주택 8%
+    config.policy.acq_tax_3house = 0.12         # 3주택 12%
+    config.policy.jongbu_rate = 0.02            # 종부세 2%
+    config.policy.jongbu_threshold_1house = 110000  # 1주택 11억
+    config.policy.jongbu_threshold_multi = 60000    # 다주택 6억
+
+    return config
+
+
+def run_scenario(name: str, config: Config, verbose=True) -> Dict[str, Any]:
+    """시나리오 실행 + 시간 측정"""
+    print(f"\n{'='*60}")
+    print(f"  {name}")
+    print(f"{'='*60}")
+
+    start = time.time()
+    sim = Simulation(config, arch=ARCH)
+    results = sim.run(steps=STEPS, verbose=verbose)
+    elapsed = time.time() - start
+    print(f"  소요시간: {elapsed:.1f}초")
+
     return results
 
 
-def run_rate_hike_scenario(steps: int = 60) -> Dict[str, Any]:
-    """금리 인상 시나리오 (3.5% → 5.5%)"""
-    print("\n" + "="*60)
-    print("시나리오 2: 금리 인상 (3.5% → 5.5%)")
-    print("="*60)
+# ─────────────────────────────────────────────────────────
+# 시나리오 정의
+# ─────────────────────────────────────────────────────────
 
-    config = Config(
-        num_households=100_000,
-        num_houses=50_000,
-        num_steps=steps,
-        seed=42
-    )
-    config.policy.interest_rate = 0.055  # 5.5%
-    config.macro.neutral_real_rate = 0.035  # 중립금리 상승
-
-    sim = Simulation(config, arch="vulkan")
-    results = sim.run(steps=steps, verbose=True)
-    return results
+def scenario_baseline() -> Dict[str, Any]:
+    """시나리오 1: 현재 한국 (2026 기본)
+    - 기준금리 2.5%, GDP 1.5%, 현행 규제 유지
+    """
+    config = make_korea_2026_config()
+    return run_scenario("시나리오 1: 현재 한국 (2026 기본)", config)
 
 
-def run_rate_cut_scenario(steps: int = 60) -> Dict[str, Any]:
-    """금리 인하 시나리오 (3.5% → 2.0%)"""
-    print("\n" + "="*60)
-    print("시나리오 3: 금리 인하 (3.5% → 2.0%)")
-    print("="*60)
-
-    config = Config(
-        num_households=100_000,
-        num_houses=50_000,
-        num_steps=steps,
-        seed=42
-    )
-    config.policy.interest_rate = 0.02  # 2.0%
-    config.macro.neutral_real_rate = 0.01
-
-    sim = Simulation(config, arch="vulkan")
-    results = sim.run(steps=steps, verbose=True)
-    return results
+def scenario_rate_cut() -> Dict[str, Any]:
+    """시나리오 2: 추가 금리 인하
+    - 기준금리 2.5% → 1.5% (100bp 인하)
+    - 경기 부양 목적, 주담대 2.5%
+    """
+    config = make_korea_2026_config()
+    config.policy.interest_rate = 0.015         # 기준금리 1.5%
+    config.macro.neutral_real_rate = 0.005      # 중립금리 하향
+    return run_scenario("시나리오 2: 추가 금리 인하 (2.5→1.5%)", config)
 
 
-def run_regulation_strict_scenario(steps: int = 60) -> Dict[str, Any]:
-    """규제 강화 시나리오 (LTV/DTI 하향)"""
-    print("\n" + "="*60)
-    print("시나리오 4: 규제 강화 (LTV 30%, DTI 30%)")
-    print("="*60)
-
-    config = Config(
-        num_households=100_000,
-        num_houses=50_000,
-        num_steps=steps,
-        seed=42
-    )
-    config.policy.ltv_1house = 0.30  # 50% → 30%
-    config.policy.ltv_2house = 0.0   # 2주택 대출 금지
-    config.policy.dti_limit = 0.30   # 40% → 30%
-    config.policy.jongbu_rate = 0.03  # 종부세 강화
-
-    sim = Simulation(config, arch="vulkan")
-    results = sim.run(steps=steps, verbose=True)
-    return results
+def scenario_recession() -> Dict[str, Any]:
+    """시나리오 3: 경기 침체
+    - GDP 성장률 -1% (수출 부진, 글로벌 둔화)
+    - 실업 상승, 기업 투자 감소
+    """
+    config = make_korea_2026_config()
+    config.macro.gdp_growth_mean = -0.01        # 역성장
+    config.macro.initial_gdp_growth = -0.01
+    config.macro.gdp_growth_volatility = 0.015  # 변동성 증가
+    return run_scenario("시나리오 3: 경기 침체 (GDP -1%)", config)
 
 
-def run_regulation_relaxed_scenario(steps: int = 60) -> Dict[str, Any]:
-    """규제 완화 시나리오 (LTV/DTI 상향)"""
-    print("\n" + "="*60)
-    print("시나리오 5: 규제 완화 (LTV 70%, DTI 50%)")
-    print("="*60)
-
-    config = Config(
-        num_households=100_000,
-        num_houses=50_000,
-        num_steps=steps,
-        seed=42
-    )
-    config.policy.ltv_1house = 0.70  # 50% → 70%
-    config.policy.ltv_2house = 0.50  # 30% → 50%
-    config.policy.dti_limit = 0.50   # 40% → 50%
-    config.policy.jongbu_rate = 0.01  # 종부세 완화
-
-    sim = Simulation(config, arch="vulkan")
-    results = sim.run(steps=steps, verbose=True)
-    return results
+def scenario_deregulation() -> Dict[str, Any]:
+    """시나리오 4: 규제 완화
+    - LTV 60% (규제지역), 다주택 30% 허용
+    - 종부세 인하, 양도세 중과 배제
+    - 스트레스 DSR 완화
+    """
+    config = make_korea_2026_config()
+    config.policy.ltv_1house = 0.60             # 1주택 60%
+    config.policy.ltv_2house = 0.30             # 2주택 30% 허용
+    config.policy.dti_limit = 0.50              # DTI 50%
+    config.policy.jongbu_rate = 0.01            # 종부세 절반
+    config.policy.transfer_tax_multi_long = 0.40  # 양도세 중과 배제
+    return run_scenario("시나리오 4: 규제 완화 (LTV↑, 종부세↓)", config)
 
 
-def run_supply_expansion_scenario(steps: int = 60) -> Dict[str, Any]:
-    """공급 확대 시나리오"""
-    print("\n" + "="*60)
-    print("시나리오 6: 공급 확대 (탄력성 2배)")
-    print("="*60)
-
-    config = Config(
-        num_households=100_000,
-        num_houses=50_000,
-        num_steps=steps,
-        seed=42
-    )
-    # 공급 탄력성 2배
-    config.supply.elasticity_gangnam = 0.6
-    config.supply.elasticity_seoul = 1.0
-    config.supply.elasticity_gyeonggi = 3.0
-    config.supply.elasticity_local = 4.0
-    config.supply.base_supply_rate = 0.002  # 기본 공급률 2배
-
-    sim = Simulation(config, arch="vulkan")
-    results = sim.run(steps=steps, verbose=True)
-    return results
+def scenario_supply_shortage() -> Dict[str, Any]:
+    """시나리오 5: 공급 절벽
+    - 2026년 수도권 입주물량 30% 감소 (16.1만 → 11.2만호)
+    - 공급 탄력성 축소, 재건축 지연
+    """
+    config = make_korea_2026_config()
+    config.supply.base_supply_rate = 0.0005     # 기본 공급률 절반
+    config.supply.elasticity_gangnam = 0.15     # 강남 공급 극히 제한
+    config.supply.elasticity_seoul = 0.25       # 서울 공급 축소
+    config.supply.elasticity_gyeonggi = 0.8     # 경기도도 축소
+    config.supply.elasticity_local = 1.5        # 지방만 여유
+    config.supply.redevelopment_base_prob = 0.0003  # 재건축 지연
+    return run_scenario("시나리오 5: 공급 절벽 (입주물량 30%↓)", config)
 
 
-def run_high_fomo_scenario(steps: int = 60) -> Dict[str, Any]:
-    """FOMO 과열 시나리오"""
-    print("\n" + "="*60)
-    print("시나리오 7: FOMO 과열 (민감도 증가)")
-    print("="*60)
+# ─────────────────────────────────────────────────────────
+# 시각화
+# ─────────────────────────────────────────────────────────
 
-    config = Config(
-        num_households=100_000,
-        num_houses=50_000,
-        num_steps=steps,
-        seed=42
-    )
-    config.behavioral.fomo_intensity = 100.0  # 50 → 100
-    config.behavioral.herding_intensity = 20.0  # 10 → 20
-    config.behavioral.fomo_trigger_threshold = 0.03  # 5% → 3%
+def plot_all(all_results: Dict[str, Dict], save_path="korea_2026_scenarios.png"):
+    """4x2 종합 비교 그래프"""
+    fig, axes = plt.subplots(4, 2, figsize=(16, 20))
+    colors = ['#2196F3', '#FF5722', '#4CAF50', '#9C27B0', '#FF9800']
+    names = list(all_results.keys())
 
-    sim = Simulation(config, arch="vulkan")
-    results = sim.run(steps=steps, verbose=True)
-    return results
-
-
-def plot_scenario_comparison(all_results: Dict[str, Dict], save_path: str = "scenario_comparison.png"):
-    """시나리오 비교 그래프"""
-    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
-
-    colors = plt.cm.tab10(np.linspace(0, 1, len(all_results)))
-
-    # 1. 강남 가격 추이
+    # 1. 강남3구 가격 추이
     ax = axes[0, 0]
-    for (name, results), color in zip(all_results.items(), colors):
-        prices = results['price_history']
-        if len(prices) > 0:
-            gangnam_prices = [p[0] for p in prices]
-            ax.plot(gangnam_prices, label=name, color=color, linewidth=2)
-    ax.set_title('강남3구 가격 추이', fontsize=12, fontweight='bold')
-    ax.set_xlabel('월')
-    ax.set_ylabel('가격 (만원)')
-    ax.legend(fontsize=8)
+    for i, (name, res) in enumerate(all_results.items()):
+        prices = [s['price_gangnam'] / 10000 for s in res['stats_history']]
+        ax.plot(prices, label=name, color=colors[i], linewidth=2)
+    ax.set_title('강남3구 아파트 가격', fontweight='bold')
+    ax.set_ylabel('가격 (억원)')
+    ax.legend(fontsize=7, loc='best')
     ax.grid(True, alpha=0.3)
 
     # 2. 전국 평균 가격
     ax = axes[0, 1]
-    for (name, results), color in zip(all_results.items(), colors):
-        stats = results['stats_history']
-        avg_prices = [s['avg_price'] for s in stats]
-        ax.plot(avg_prices, label=name, color=color, linewidth=2)
-    ax.set_title('전국 평균 가격', fontsize=12, fontweight='bold')
-    ax.set_xlabel('월')
-    ax.set_ylabel('가격 (만원)')
-    ax.legend(fontsize=8)
+    for i, (name, res) in enumerate(all_results.items()):
+        prices = [s['avg_price'] / 10000 for s in res['stats_history']]
+        ax.plot(prices, label=name, color=colors[i], linewidth=2)
+    ax.set_title('전국 평균 가격', fontweight='bold')
+    ax.set_ylabel('가격 (억원)')
+    ax.legend(fontsize=7, loc='best')
     ax.grid(True, alpha=0.3)
 
-    # 3. 거래량
-    ax = axes[0, 2]
-    for (name, results), color in zip(all_results.items(), colors):
-        stats = results['stats_history']
-        transactions = [s['transaction_total'] for s in stats]
-        # 6개월 이동평균
-        if len(transactions) >= 6:
-            transactions_ma = np.convolve(transactions, np.ones(6)/6, mode='valid')
-            ax.plot(transactions_ma, label=name, color=color, linewidth=2)
-    ax.set_title('월간 거래량 (6개월 이동평균)', fontsize=12, fontweight='bold')
-    ax.set_xlabel('월')
-    ax.set_ylabel('거래 건수')
-    ax.legend(fontsize=8)
-    ax.grid(True, alpha=0.3)
-
-    # 4. 자가 보유율
+    # 3. 실업률
     ax = axes[1, 0]
-    for (name, results), color in zip(all_results.items(), colors):
-        stats = results['stats_history']
-        homeowner = [s['homeowner_rate'] * 100 for s in stats]
-        ax.plot(homeowner, label=name, color=color, linewidth=2)
-    ax.set_title('자가 보유율', fontsize=12, fontweight='bold')
-    ax.set_xlabel('월')
-    ax.set_ylabel('비율 (%)')
-    ax.legend(fontsize=8)
+    for i, (name, res) in enumerate(all_results.items()):
+        unemp = [s['unemployment_rate'] * 100 for s in res['stats_history']]
+        ax.plot(unemp, label=name, color=colors[i], linewidth=2)
+    ax.set_title('실업률', fontweight='bold')
+    ax.set_ylabel('%')
+    ax.legend(fontsize=7, loc='best')
     ax.grid(True, alpha=0.3)
 
-    # 5. 다주택자 비율
+    # 4. 거래량 (6개월 이동평균)
     ax = axes[1, 1]
-    for (name, results), color in zip(all_results.items(), colors):
-        stats = results['stats_history']
-        multi = [s['multi_owner_rate'] * 100 for s in stats]
-        ax.plot(multi, label=name, color=color, linewidth=2)
-    ax.set_title('다주택자 비율', fontsize=12, fontweight='bold')
-    ax.set_xlabel('월')
-    ax.set_ylabel('비율 (%)')
-    ax.legend(fontsize=8)
+    for i, (name, res) in enumerate(all_results.items()):
+        trans = [s['transaction_total'] for s in res['stats_history']]
+        if len(trans) >= 6:
+            ma = np.convolve(trans, np.ones(6)/6, mode='valid')
+            ax.plot(ma, label=name, color=colors[i], linewidth=2)
+    ax.set_title('월간 거래량 (6개월 이동평균)', fontweight='bold')
+    ax.set_ylabel('건수')
+    ax.legend(fontsize=7, loc='best')
     ax.grid(True, alpha=0.3)
 
-    # 6. 수요/공급 비율
-    ax = axes[1, 2]
-    for (name, results), color in zip(all_results.items(), colors):
-        stats = results['stats_history']
-        ds_ratio = [s['demand_supply_ratio'] for s in stats]
-        ax.plot(ds_ratio, label=name, color=color, linewidth=2)
-    ax.axhline(y=1.0, color='red', linestyle='--', alpha=0.5, label='균형선')
-    ax.set_title('수요/공급 비율', fontsize=12, fontweight='bold')
+    # 5. 자가보유율
+    ax = axes[2, 0]
+    for i, (name, res) in enumerate(all_results.items()):
+        rate = [s['homeowner_rate'] * 100 for s in res['stats_history']]
+        ax.plot(rate, label=name, color=colors[i], linewidth=2)
+    ax.set_title('자가보유율', fontweight='bold')
+    ax.set_ylabel('%')
+    ax.legend(fontsize=7, loc='best')
+    ax.grid(True, alpha=0.3)
+
+    # 6. 평균 소득
+    ax = axes[2, 1]
+    for i, (name, res) in enumerate(all_results.items()):
+        inc = [s['avg_income'] for s in res['stats_history']]
+        ax.plot(inc, label=name, color=colors[i], linewidth=2)
+    ax.set_title('평균 소득 (만원/월)', fontweight='bold')
+    ax.set_ylabel('만원')
+    ax.legend(fontsize=7, loc='best')
+    ax.grid(True, alpha=0.3)
+
+    # 7. 수요/공급 비율
+    ax = axes[3, 0]
+    for i, (name, res) in enumerate(all_results.items()):
+        ds = [s['demand_supply_ratio'] for s in res['stats_history']]
+        ax.plot(ds, label=name, color=colors[i], linewidth=2)
+    ax.axhline(y=1.0, color='red', linestyle='--', alpha=0.5, label='균형')
+    ax.set_title('수요/공급 비율', fontweight='bold')
     ax.set_xlabel('월')
     ax.set_ylabel('비율')
-    ax.legend(fontsize=8)
+    ax.legend(fontsize=7, loc='best')
     ax.grid(True, alpha=0.3)
 
-    plt.tight_layout()
+    # 8. 강제매도 위험
+    ax = axes[3, 1]
+    for i, (name, res) in enumerate(all_results.items()):
+        risk = [s.get('at_risk_count', 0) for s in res['stats_history']]
+        ax.plot(risk, label=name, color=colors[i], linewidth=2)
+    ax.set_title('강제매도 위험 가구', fontweight='bold')
+    ax.set_xlabel('월')
+    ax.set_ylabel('가구 수')
+    ax.legend(fontsize=7, loc='best')
+    ax.grid(True, alpha=0.3)
+
+    plt.suptitle('2026 한국 부동산 시장 시뮬레이션 (5년 전망)',
+                 fontsize=16, fontweight='bold', y=0.98)
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
     plt.close()
     print(f"\n그래프 저장: {save_path}")
 
 
-def plot_macro_comparison(all_results: Dict[str, Dict], save_path: str = "macro_comparison.png"):
-    """거시경제 지표 비교"""
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+def print_summary(all_results: Dict[str, Dict]):
+    """시나리오별 요약"""
+    print("\n" + "=" * 100)
+    print("  2026 한국 부동산 시뮬레이션 - 시나리오 비교 (5년 전망)")
+    print("=" * 100)
 
-    colors = plt.cm.tab10(np.linspace(0, 1, len(all_results)))
+    header = (f"{'시나리오':<25} {'강남(억)':>9} {'전국(억)':>9} {'변동률':>8} "
+              f"{'거래량':>7} {'자가율':>7} {'실업률':>7} {'소득':>7} {'위험':>5}")
+    print(header)
+    print("-" * 100)
 
-    for (name, results), color in zip(all_results.items(), colors):
-        macro = results.get('macro_history', [])
-        if not macro:
-            continue
+    for name, res in all_results.items():
+        s0 = res['stats_history'][0]
+        s = res['stats_history'][-1]
+        gangnam_chg = (s['price_gangnam'] - s0['price_gangnam']) / s0['price_gangnam'] * 100
 
-        # 1. 기준금리
-        policy_rates = [m['policy_rate'] * 100 for m in macro]
-        axes[0, 0].plot(policy_rates, label=name, color=color, linewidth=2)
+        print(f"{name:<25} "
+              f"{s['price_gangnam']/10000:>8.1f} "
+              f"{s['avg_price']/10000:>8.1f} "
+              f"{gangnam_chg:>+7.1f}% "
+              f"{s['transaction_total']:>7,} "
+              f"{s['homeowner_rate']*100:>6.1f}% "
+              f"{s['unemployment_rate']*100:>6.1f}% "
+              f"{s['avg_income']:>6.0f} "
+              f"{s.get('at_risk_count', 0):>5}")
 
-        # 2. 주담대 금리
-        mortgage_rates = [m['mortgage_rate'] * 100 for m in macro]
-        axes[0, 1].plot(mortgage_rates, label=name, color=color, linewidth=2)
+    # 지역별 가격 변동 비교
+    print("\n" + "=" * 100)
+    print("  지역별 가격 변동률 (5년)")
+    print("=" * 100)
+    print(f"{'시나리오':<25} {'강남':>9} {'마용성':>9} {'기타서울':>9} {'경기':>9} {'지방':>9}")
+    print("-" * 100)
 
-        # 3. GDP 성장률
-        gdp = [m['gdp_growth'] * 100 for m in macro]
-        axes[1, 0].plot(gdp, label=name, color=color, linewidth=2)
-
-        # 4. 인플레이션
-        inflation = [m['inflation'] * 100 for m in macro]
-        axes[1, 1].plot(inflation, label=name, color=color, linewidth=2)
-
-    axes[0, 0].set_title('기준금리', fontsize=12, fontweight='bold')
-    axes[0, 0].set_ylabel('%')
-    axes[0, 0].legend(fontsize=8)
-    axes[0, 0].grid(True, alpha=0.3)
-
-    axes[0, 1].set_title('주담대 금리', fontsize=12, fontweight='bold')
-    axes[0, 1].set_ylabel('%')
-    axes[0, 1].legend(fontsize=8)
-    axes[0, 1].grid(True, alpha=0.3)
-
-    axes[1, 0].set_title('GDP 성장률 (연율)', fontsize=12, fontweight='bold')
-    axes[1, 0].set_xlabel('월')
-    axes[1, 0].set_ylabel('%')
-    axes[1, 0].legend(fontsize=8)
-    axes[1, 0].grid(True, alpha=0.3)
-
-    axes[1, 1].set_title('인플레이션', fontsize=12, fontweight='bold')
-    axes[1, 1].set_xlabel('월')
-    axes[1, 1].set_ylabel('%')
-    axes[1, 1].legend(fontsize=8)
-    axes[1, 1].grid(True, alpha=0.3)
-
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=150, bbox_inches='tight')
-    plt.close()
-    print(f"거시경제 그래프 저장: {save_path}")
-
-
-def plot_heterogeneity_distribution(sim: Simulation, save_path: str = "heterogeneity_dist.png"):
-    """에이전트 이질성 분포 시각화"""
-    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
-
-    # 1. 손실 회피 계수 분포
-    loss_aversion = sim.households.loss_aversion.to_numpy()
-    axes[0, 0].hist(loss_aversion, bins=50, color='steelblue', edgecolor='white', alpha=0.7)
-    axes[0, 0].axvline(x=loss_aversion.mean(), color='red', linestyle='--', label=f'평균: {loss_aversion.mean():.2f}')
-    axes[0, 0].set_title('손실회피계수 (λ) 분포', fontsize=11, fontweight='bold')
-    axes[0, 0].set_xlabel('λ')
-    axes[0, 0].legend()
-
-    # 2. 현재 편향 (β) 분포
-    discount_beta = sim.households.discount_beta.to_numpy()
-    axes[0, 1].hist(discount_beta, bins=50, color='coral', edgecolor='white', alpha=0.7)
-    axes[0, 1].axvline(x=discount_beta.mean(), color='red', linestyle='--', label=f'평균: {discount_beta.mean():.2f}')
-    axes[0, 1].set_title('현재편향 (β) 분포', fontsize=11, fontweight='bold')
-    axes[0, 1].set_xlabel('β')
-    axes[0, 1].legend()
-
-    # 3. FOMO 민감도 분포
-    fomo = sim.households.fomo_sensitivity.to_numpy()
-    axes[0, 2].hist(fomo, bins=50, color='green', edgecolor='white', alpha=0.7)
-    axes[0, 2].axvline(x=fomo.mean(), color='red', linestyle='--', label=f'평균: {fomo.mean():.2f}')
-    axes[0, 2].set_title('FOMO 민감도 분포', fontsize=11, fontweight='bold')
-    axes[0, 2].set_xlabel('민감도')
-    axes[0, 2].legend()
-
-    # 4. 군집 성향 분포
-    herding = sim.households.herding_tendency.to_numpy()
-    axes[1, 0].hist(herding, bins=50, color='purple', edgecolor='white', alpha=0.7)
-    axes[1, 0].axvline(x=herding.mean(), color='red', linestyle='--', label=f'평균: {herding.mean():.2f}')
-    axes[1, 0].set_title('군집성향 분포', fontsize=11, fontweight='bold')
-    axes[1, 0].set_xlabel('성향')
-    axes[1, 0].legend()
-
-    # 5. 위험 허용도 분포
-    risk = sim.households.risk_tolerance.to_numpy()
-    axes[1, 1].hist(risk, bins=50, color='orange', edgecolor='white', alpha=0.7)
-    axes[1, 1].axvline(x=risk.mean(), color='red', linestyle='--', label=f'평균: {risk.mean():.2f}')
-    axes[1, 1].set_title('위험허용도 분포', fontsize=11, fontweight='bold')
-    axes[1, 1].set_xlabel('허용도')
-    axes[1, 1].legend()
-
-    # 6. 가격 기대 분포
-    expectation = sim.households.price_expectation.to_numpy()
-    axes[1, 2].hist(expectation, bins=50, color='teal', edgecolor='white', alpha=0.7)
-    axes[1, 2].axvline(x=expectation.mean(), color='red', linestyle='--', label=f'평균: {expectation.mean():.2f}')
-    axes[1, 2].axvline(x=0, color='gray', linestyle=':', alpha=0.5)
-    axes[1, 2].set_title('가격기대 분포', fontsize=11, fontweight='bold')
-    axes[1, 2].set_xlabel('기대 (-1 ~ 1)')
-    axes[1, 2].legend()
-
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=150, bbox_inches='tight')
-    plt.close()
-    print(f"이질성 분포 그래프 저장: {save_path}")
-
-
-def print_summary_statistics(all_results: Dict[str, Dict]):
-    """시나리오별 요약 통계"""
-    print("\n" + "="*80)
-    print("시나리오별 요약 통계 (최종 시점)")
-    print("="*80)
-
-    headers = ["시나리오", "강남가격(억)", "전국평균(억)", "거래량", "자가율(%)", "다주택(%)", "수급비율"]
-
-    # 헤더 출력
-    print(f"{'시나리오':<20} {'강남(억)':>10} {'전국(억)':>10} {'거래량':>8} {'자가율':>8} {'다주택':>8} {'수급비':>8}")
-    print("-" * 80)
-
-    for name, results in all_results.items():
-        stats = results['stats_history'][-1]
-        print(f"{name:<20} "
-              f"{stats['price_gangnam']/10000:>10.1f} "
-              f"{stats['avg_price']/10000:>10.1f} "
-              f"{stats['transaction_total']:>8,} "
-              f"{stats['homeowner_rate']*100:>7.1f}% "
-              f"{stats['multi_owner_rate']*100:>7.1f}% "
-              f"{stats['demand_supply_ratio']:>8.2f}")
-
-    # 가격 변화율 계산
-    print("\n" + "="*80)
-    print("시나리오별 가격 변화율 (시작 → 종료)")
-    print("="*80)
-
-    print(f"{'시나리오':<20} {'강남':>12} {'경기':>12} {'지방':>12} {'전국평균':>12}")
-    print("-" * 80)
-
-    for name, results in all_results.items():
-        stats_start = results['stats_history'][0]
-        stats_end = results['stats_history'][-1]
-
-        gangnam_change = (stats_end['price_gangnam'] - stats_start['price_gangnam']) / stats_start['price_gangnam'] * 100
-        gyeonggi_change = (stats_end['price_gyeonggi'] - stats_start['price_gyeonggi']) / stats_start['price_gyeonggi'] * 100
-        jibang_change = (stats_end['price_jibang'] - stats_start['price_jibang']) / stats_start['price_jibang'] * 100
-        avg_change = (stats_end['avg_price'] - stats_start['avg_price']) / stats_start['avg_price'] * 100
-
-        print(f"{name:<20} "
-              f"{gangnam_change:>+11.1f}% "
-              f"{gyeonggi_change:>+11.1f}% "
-              f"{jibang_change:>+11.1f}% "
-              f"{avg_change:>+11.1f}%")
+    for name, res in all_results.items():
+        ph = res['price_history']
+        if len(ph) >= 2:
+            p0 = ph[0]
+            p1 = ph[-1]
+            chg = (p1 - p0) / (p0 + 1e-6) * 100
+            print(f"{name:<25} "
+                  f"{chg[0]:>+8.1f}% "
+                  f"{chg[1]:>+8.1f}% "
+                  f"{chg[2]:>+8.1f}% "
+                  f"{np.mean(chg[4:7]):>+8.1f}% "
+                  f"{np.mean(chg[7:]):>+8.1f}%")
 
 
 def main():
     """메인 실행"""
-    print("="*80)
-    print("한국 부동산 ABM 시뮬레이션 - 다중 시나리오 분석")
-    print("="*80)
+    total_start = time.time()
 
-    # 시뮬레이션 기간 설정 (5년 = 60개월)
-    STEPS = 60
+    print("=" * 60)
+    print("  2026 한국 부동산 시장 ABM 시뮬레이션")
+    print(f"  가구 {N_HOUSEHOLDS:,} | 주택 {N_HOUSES:,} | {STEPS}개월")
+    print(f"  GPU: {ARCH.upper()}")
+    print("=" * 60)
 
     all_results = {}
 
-    # 1. 기본 시나리오 (이질성 확인용)
-    results = run_baseline_scenario(steps=STEPS)
-    all_results['기본'] = results
+    all_results['기본 (현재)'] = scenario_baseline()
+    all_results['금리인하'] = scenario_rate_cut()
+    all_results['경기침체'] = scenario_recession()
+    all_results['규제완화'] = scenario_deregulation()
+    all_results['공급절벽'] = scenario_supply_shortage()
 
-    # 이질성 분포 시각화를 위해 별도 시뮬레이션 생성
-    config = Config(num_households=100_000, num_houses=50_000, seed=42)
-    sim_for_plot = Simulation(config, arch="vulkan")
-    sim_for_plot.initialize()
-    plot_heterogeneity_distribution(sim_for_plot, "heterogeneity_dist.png")
+    # 시각화 + 요약
+    plot_all(all_results)
+    print_summary(all_results)
 
-    # 2. 금리 인상 시나리오
-    all_results['금리인상'] = run_rate_hike_scenario(steps=STEPS)
-
-    # 3. 금리 인하 시나리오
-    all_results['금리인하'] = run_rate_cut_scenario(steps=STEPS)
-
-    # 4. 규제 강화 시나리오
-    all_results['규제강화'] = run_regulation_strict_scenario(steps=STEPS)
-
-    # 5. 규제 완화 시나리오
-    all_results['규제완화'] = run_regulation_relaxed_scenario(steps=STEPS)
-
-    # 6. 공급 확대 시나리오
-    all_results['공급확대'] = run_supply_expansion_scenario(steps=STEPS)
-
-    # 7. FOMO 과열 시나리오
-    all_results['FOMO과열'] = run_high_fomo_scenario(steps=STEPS)
-
-    # 결과 시각화
-    plot_scenario_comparison(all_results, "scenario_comparison.png")
-    plot_macro_comparison(all_results, "macro_comparison.png")
-
-    # 요약 통계
-    print_summary_statistics(all_results)
-
-    print("\n" + "="*80)
-    print("모든 시나리오 실행 완료!")
-    print("="*80)
-    print("\n생성된 파일:")
-    print("  - heterogeneity_dist.png: 에이전트 이질성 분포")
-    print("  - scenario_comparison.png: 시나리오 비교 그래프")
-    print("  - macro_comparison.png: 거시경제 지표 비교")
+    total_elapsed = time.time() - total_start
+    print(f"\n총 소요시간: {total_elapsed:.1f}초")
+    print("생성 파일: korea_2026_scenarios.png")
 
 
 if __name__ == "__main__":

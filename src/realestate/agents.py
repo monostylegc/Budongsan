@@ -495,6 +495,28 @@ class Households:
         self.region_prestige = ti.field(dtype=ti.f32, shape=NUM_REGIONS)  # 심리적 프리미엄
         self.region_job_density = ti.field(dtype=ti.f32, shape=NUM_REGIONS)  # 일자리 밀도
 
+        # === 고용 상태 (JobMarket 연동) ===
+        self.employment_status = ti.field(dtype=ti.i32, shape=self.n)
+        # 0: 취업, 1: 실업, 2: 실업급여 수령중
+        self.industry = ti.field(dtype=ti.i32, shape=self.n)
+        # 산업 분류 (0: IT/금융, 1: 전문서비스, 2: 제조업, 3: 서비스업, 4: 공공/교육)
+        self.unemployment_months = ti.field(dtype=ti.i32, shape=self.n)
+        # 연속 실업 개월수
+        self.previous_income = ti.field(dtype=ti.f32, shape=self.n)
+        # 실업 전 소득 (실업급여 계산용)
+        self.forced_sale_countdown = ti.field(dtype=ti.i32, shape=self.n)
+        # 강제매도 카운트다운 (-1이면 정상)
+        self.housing_cost_unpaid = ti.field(dtype=ti.i32, shape=self.n)
+        # 주거비 미납 개월수
+
+        # === 매수/매도 의사결정 중간 결과 (독립 모듈 분리용) ===
+        self.buy_score_affordability = ti.field(dtype=ti.f32, shape=self.n)
+        self.buy_score_lifecycle = ti.field(dtype=ti.f32, shape=self.n)
+        self.buy_score_behavioral = ti.field(dtype=ti.f32, shape=self.n)
+        self.buy_score_market = ti.field(dtype=ti.f32, shape=self.n)
+        self.buy_score_policy = ti.field(dtype=ti.f32, shape=self.n)
+        self.is_affordable_flag = ti.field(dtype=ti.i32, shape=self.n)
+
         # === 전망이론 파라미터 (Prospect Theory) ===
         # 개인별 손실 회피 계수 (λ) - 기존 loss_aversion 필드 사용
         # 추가: 참조점 (reference point)
@@ -1009,8 +1031,12 @@ class Households:
         return annual_payment / annual_income
 
     def _check_dsr_affordable_numpy(self, dsr: float, agent_type: int,
-                                    is_wealthy: bool, job_density: float) -> bool:
-        """DSR 기반 구매 가능 여부 (NumPy 버전)"""
+                                    is_wealthy: bool, job_density: float = 0.0) -> bool:
+        """DSR 기반 구매 가능 여부 (NumPy 버전)
+
+        [수정] 영끌(DSR 한도 확대) 로직 제거
+        소득이 지역×산업 기반이므로 고소득 지역은 자연스럽게 DSR이 낮아짐
+        """
         aff_cfg = self.config.policy.affordability
 
         # 에이전트 유형별 DSR 한도
@@ -1021,18 +1047,17 @@ class Households:
         else:  # 투기자
             dsr_limit = aff_cfg.dsr_limit_speculator
 
-        # 영끌 허용: 일자리 밀도 높은 지역
-        if aff_cfg.allow_stretched_dsr and job_density >= 0.5:
-            dsr_limit *= aff_cfg.stretched_dsr_multiplier
-
         return dsr <= dsr_limit
 
-    def select_target_regions(self, market, rng: np.random.Generator):
+    def select_target_regions(self, market, rng: np.random.Generator, job_density=None):
         """에이전트 유형별 목표 지역 선택 (DSR 기반 통일 체계)
 
         실수요자: 거주 지역 위주, 인근 지역도 고려 (DSR 기반)
         투자자: 투자매력도 높은 지역 탐색 (기대수익률 기반)
         투기자: 가격 상승률 높은 지역 탐색 (모멘텀 기반)
+
+        Args:
+            job_density: 동적 일자리 밀도 (None이면 정적 REGION_JOB_DENSITY 사용)
         """
         agent_types = self.agent_type.to_numpy()
         home_regions = self.region.to_numpy()
@@ -1053,7 +1078,9 @@ class Households:
         self.region_price_to_hist.from_numpy(price_to_hist.astype(np.float32))
         self.region_attractiveness.from_numpy(attractiveness.astype(np.float32))
         self.region_prestige.from_numpy(REGION_PRESTIGE.astype(np.float32))
-        self.region_job_density.from_numpy(REGION_JOB_DENSITY.astype(np.float32))
+        # 동적 일자리 밀도 사용 (JobMarket 제공, 없으면 정적 값)
+        effective_job_density = job_density if job_density is not None else REGION_JOB_DENSITY
+        self.region_job_density.from_numpy(effective_job_density.astype(np.float32))
 
         target_regions = np.copy(home_regions)  # 기본값: 거주 지역
 
@@ -1102,7 +1129,7 @@ class Households:
                 candidates.append(home)
 
                 # 일자리 밀도 높은 지역도 후보에 추가
-                high_job_regions = [r for r in range(NUM_REGIONS) if REGION_JOB_DENSITY[r] >= 0.5]
+                high_job_regions = [r for r in range(NUM_REGIONS) if effective_job_density[r] >= 0.5]
                 candidates = list(set(candidates + high_job_regions))
 
                 # 고자산가는 프리미엄 지역도 고려
@@ -1123,9 +1150,9 @@ class Households:
                     )
 
                     # DSR 기반 구매 가능 여부 판단
-                    job_density = REGION_JOB_DENSITY[r]
+                    jd = effective_job_density[r]
                     is_affordable = self._check_dsr_affordable_numpy(
-                        dsr, agent_type, is_wealthy, job_density
+                        dsr, agent_type, is_wealthy, jd
                     )
 
                     if not is_affordable:
@@ -1135,7 +1162,7 @@ class Households:
                     dsr_score = max(0, 1 - dsr) * 0.3  # DSR 0이면 0.3, DSR 1이면 0
 
                     # 일자리 밀도 점수 (핵심 요인) - 최고 가중치
-                    job_score = job_density * 0.5  # 최대 0.5
+                    job_score = effective_job_density[r] * 0.5  # 최대 0.5
 
                     # PIR 기반 점수
                     pir_score = max(0, 1 - pir[r] / 30) * 0.15
@@ -1163,7 +1190,7 @@ class Households:
                         interest_rate, asset_util, loan_term
                     )
                     affordable_mask[r] = self._check_dsr_affordable_numpy(
-                        dsr, agent_type, is_wealthy, REGION_JOB_DENSITY[r]
+                        dsr, agent_type, is_wealthy, effective_job_density[r]
                     )
 
                 if np.sum(affordable_mask) > 0:
@@ -1193,7 +1220,7 @@ class Households:
                         interest_rate, asset_util, loan_term
                     )
                     affordable_mask[r] = self._check_dsr_affordable_numpy(
-                        dsr, agent_type, is_wealthy, REGION_JOB_DENSITY[r]
+                        dsr, agent_type, is_wealthy, effective_job_density[r]
                     )
 
                 if np.sum(affordable_mask) > 0:
@@ -1271,107 +1298,65 @@ class Households:
             self.observed_buying[i] = region_buy_rate
             self.observed_price_trend[i] = self.region_price_trend_6m[region]
 
+    # ================================================================
+    # 매수/매도 의사결정 - 6개 독립 커널으로 분리
+    # ================================================================
+    # 기존 decide_buy_sell (600줄 단일 커널) →
+    # compute_affordability → compute_lifecycle_urgency →
+    # compute_behavioral_signals → compute_market_signals →
+    # compute_policy_penalty → finalize_buy_sell_decision
+    # ================================================================
+
     @ti.kernel
-    def decide_buy_sell(
+    def compute_affordability(
         self,
         region_prices: ti.template(),
         ltv_limits: ti.template(),
-        acq_tax_rates: ti.template(),  # 취득세율 (주택 보유 수별)
         dti_limit: ti.f32,
         interest_rate: ti.f32,
-        buy_threshold: ti.f32,
-        sell_threshold: ti.f32,
-        transfer_tax_multi: ti.f32,
-        jongbu_rate: ti.f32,
-        jongbu_threshold: ti.f32,
-        # Prospect Theory 파라미터
-        pt_alpha: ti.f32,
-        pt_beta: ti.f32,
-        pt_gamma_gain: ti.f32,
-        pt_gamma_loss: ti.f32,
-        # DSR 기반 affordability 파라미터 (통일 체계)
         dsr_limit_end_user: ti.f32,
         dsr_limit_investor: ti.f32,
         dsr_limit_speculator: ti.f32,
         asset_util_normal: ti.f32,
         asset_util_wealthy: ti.f32,
-        asset_util_homeless: ti.f32,  # 무주택자 자산 활용률 (첫 집 마련 시 높음)
+        asset_util_homeless: ti.f32,
         loan_term_years: ti.i32,
-        allow_stretched_dsr: ti.i32,
-        stretched_dsr_mult: ti.f32,
         wealthy_threshold: ti.f32
     ):
-        """매수/매도 의사결정 (행동경제학 기반, DSR 통일 체계)
+        """[환경 모듈] DSR/LTV 기반 구매력 계산
 
-        행동경제학 요소:
-        - Prospect Theory (Kahneman & Tversky, 1992): S자형 가치 함수, 손실 회피
-        - Hyperbolic Discounting (Laibson, 1997): 현재 편향
-        - FOMO: 가격 상승 시 매수 욕구 증가 (덧셈 기반, 제한된 배율)
-        - 앵커링: 매입가에 집착
-        - 군집 행동: 주변 매수 증가 시 따라 매수
-        - 생애주기: 결혼/육아/학군/은퇴에 따른 수요
-
-        수정 (2024): 매수/매도 점수 계산을 덧셈 기반으로 통일
-        수정 (2026): affordability를 DSR 기반 통일 체계로 변경
+        결과: is_affordable_flag, buy_score_affordability
+        실업자(employment_status != 0)는 매수 불가
         """
         for i in range(self.n):
             owned = self.owned_houses[i]
             income = self.income[i]
             asset = self.asset[i]
-            region = self.region[i]
-            target = self.target_region[i]  # 목표 지역 (select_target_regions에서 설정)
-            expectation = self.price_expectation[i]
-            risk = self.risk_tolerance[i]
-            age = self.age[i]
-            homeless = self.homeless_months[i]
-            life_stage = self.life_stage[i]
-            fomo_sens = self.fomo_sensitivity[i]
-            herding = self.herding_tendency[i]
-            loss_aversion_coef = self.loss_aversion[i]
-            purchase_price_val = self.purchase_price[i]
-            eldest_child = self.eldest_child_age[i]
-            beta = self.discount_beta[i]
-            delta = self.discount_delta[i]
-
-            # 목표 지역의 가격 및 지표 사용
-            price = region_prices[target]
-            price_trend = self.region_price_trend_6m[target]  # 6개월 상승률
-
-            # 가격 적정성 지표 (구조적 개선)
-            pir = self.region_pir[target]  # 소득대비가격비
-            price_to_hist = self.region_price_to_hist[target]  # 역사적 평균 대비
-            attractiveness = self.region_attractiveness[target]  # 투자 매력도
-            prestige = self.region_prestige[target]  # 심리적 프리미엄
-            job_density = self.region_job_density[target]  # 일자리 밀도
-
-            # === 매수 의사결정 ===
-            buy_score = 0.0
-
-            # 1. DSR 기반 구매력 계산 (통일 체계)
+            target = self.target_region[i]
             agent_type = self.agent_type[i]
 
-            # 고자산가 여부 판단 (백분위 기준으로 통일)
+            price = region_prices[target]
+
+            # 실업자는 매수 불가
+            if self.employment_status[i] != 0:
+                self.is_affordable_flag[i] = 0
+                self.buy_score_affordability[i] = 0.0
+                continue
+
+            # 고자산가 여부
             is_wealthy = 1 if asset >= wealthy_threshold else 0
 
-            # ================================================================
-            # 자산 활용 비율 (2026-02-06 수정)
-            # ================================================================
-            # 무주택자: 첫 집 마련에 자산의 85% 동원 (현실적)
-            # 유주택자(일반): 여유 자금의 50%만 활용 (기존 집 유지비 고려)
-            # 고자산가: 70% 활용 (자금 여유)
-            # ================================================================
-            asset_util = asset_util_normal  # 기본값
+            # 자산 활용 비율
+            asset_util = asset_util_normal
             if owned == 0:
-                asset_util = asset_util_homeless  # 무주택자: 85%
+                asset_util = asset_util_homeless
             elif is_wealthy == 1:
-                asset_util = asset_util_wealthy  # 고자산가: 70%
+                asset_util = asset_util_wealthy
 
             # 부모 지원금 (무주택자만)
             parent_support_amount = self.parent_support[i] if owned == 0 else 0.0
 
-            # DSR 계산 (부모 지원금 포함한 총 자산으로 계산)
-            # 부모 지원금은 자산 활용률과 별개로 100% 사용 가능하므로
-            # effective_asset = asset + parent_support / asset_util 로 환산
+            # DSR 계산
             effective_asset = asset + parent_support_amount / asset_util if asset_util > 0 else asset
             annual_income = income * 12.0
             dsr = calculate_dsr(price, effective_asset, annual_income, interest_rate, asset_util, loan_term_years)
@@ -1383,371 +1368,336 @@ class Households:
             elif agent_type == 2:
                 dsr_limit = dsr_limit_speculator
 
-            # 영끌 허용: 일자리 밀도 높은 지역
-            if allow_stretched_dsr == 1 and job_density >= 0.5:
-                dsr_limit = dsr_limit * stretched_dsr_mult
-
             # DSR 기반 구매 가능 여부
             is_affordable = 1 if dsr <= dsr_limit else 0
 
-            # ================================================================
-            # LTV 체크 추가 (2026-02-06)
-            # 필요 대출액이 LTV 한도를 초과하면 구매 불가
-            # 이전에는 LTV 변경이 효과 없던 버그 수정
-            # ================================================================
-            ltv = ltv_limits[ti.min(owned, 3)]  # [무주택70%, 1주택50%, 2주택30%, 3주택+0%]
-
-            # 부모 지원 포함 (무주택자만)
+            # LTV 체크
+            ltv = ltv_limits[ti.min(owned, 3)]
             parent_support_val = self.parent_support[i] if owned == 0 else 0.0
             available_asset = asset * asset_util + parent_support_val
-
             required_loan = ti.max(price - available_asset, 0.0)
             max_loan_by_ltv = price * ltv
 
-            # LTV 초과 시 구매 불가
             if required_loan > max_loan_by_ltv:
                 is_affordable = 0
 
-            # 기존 코드 호환성 (buying_power, affordability는 점수 계산에만 사용)
-            max_loan = ti.min(income * 12.0 * dti_limit / interest_rate, max_loan_by_ltv)
-            buying_power = available_asset + max_loan  # 부모 지원 포함
-            affordability = buying_power / price if price > 0 else 0.0
-            affordability = ti.min(affordability, 2.0)
+            self.is_affordable_flag[i] = is_affordable
 
-            # 2. 생애주기 기반 주거 긴급도 (덧셈 기반)
-            # 수정 (2024): 기본 urgency를 낮추어 매수 희망 비율 현실화
+            # DSR 여유 보너스
+            dsr_bonus = 0.0
+            if is_affordable == 1:
+                dsr_bonus = ti.max(0.0, (dsr_limit - dsr) * 0.3)
+                dsr_bonus = ti.min(dsr_bonus, 0.15)
+            self.buy_score_affordability[i] = dsr_bonus
+
+    @ti.kernel
+    def compute_lifecycle_urgency(self):
+        """[에이전트 모듈] 생애주기 기반 주거 긴급도
+
+        결과: buy_score_lifecycle
+        """
+        for i in range(self.n):
+            owned = self.owned_houses[i]
+            age = self.age[i]
+            homeless = self.homeless_months[i]
+            life_stage = self.life_stage[i]
+            eldest_child = self.eldest_child_age[i]
+
             urgency = 0.0
             life_stage_bonus = 0.0
 
             if owned == 0:  # 무주택자
-                urgency = 0.15  # 기본 무주택 압박 (0.3 → 0.15로 하향)
+                urgency = 0.15
 
-                # 생애주기별 긴급도 (덧셈 방식, 값 축소)
                 if life_stage == 0:  # 미혼
                     if 28 <= age <= 35:
-                        urgency += 0.10  # 결혼 준비기
+                        urgency += 0.10
                 elif life_stage == 1:  # 신혼
-                    urgency += 0.20  # 신혼집 마련 압박 최대
+                    urgency += 0.20
                     life_stage_bonus = 0.10
                 elif life_stage == 2:  # 육아기
-                    urgency += 0.15  # 넓은 집 필요
+                    urgency += 0.15
                     life_stage_bonus = 0.08
                 elif life_stage == 3:  # 학령기
-                    urgency += 0.12  # 학군 이동 수요
+                    urgency += 0.12
                     if 10 <= eldest_child <= 15:
                         urgency += 0.08
                 elif life_stage == 5:  # 은퇴기
-                    urgency += 0.05  # 안정적 주거
+                    urgency += 0.05
 
-                # 무주택 기간에 따른 초조함 (더 느리게)
-                if homeless > 24:  # 2년 이상
+                if homeless > 24:
                     urgency += ti.min(homeless / 300.0, 0.15)
 
             elif owned == 1:  # 1주택자 갈아타기
-                # 갈아타기 urgency 상향 조정 (2026-02-05)
-                # 기존: 기본 0.02 → 변경: 기본 0.10
-                # 근거: 갈아타기는 "이사"의 일종으로 생애주기상 중요한 결정
-                # 무주택자보다 낮지만, 생애주기 이유가 있으면 적극적으로 고려
-                urgency = 0.10  # 기본값 상향 (0.02 → 0.10)
-                if life_stage == 2:  # 육아기: 넓은 집 필요
-                    urgency += 0.12  # 0.08 → 0.12
+                urgency = 0.10
+                if life_stage == 2:
+                    urgency += 0.12
                     life_stage_bonus = 0.05
-                elif life_stage == 3:  # 학령기: 학군 이동
-                    urgency += 0.15  # 0.10 → 0.15
+                elif life_stage == 3:
+                    urgency += 0.15
                     if 10 <= eldest_child <= 15:
-                        urgency += 0.08  # 0.06 → 0.08 (중학교 입학 전후)
+                        urgency += 0.08
                     life_stage_bonus = 0.05
-                elif life_stage == 5:  # 은퇴기: 다운사이징/요양
-                    urgency += 0.10  # 추가 (기존 0)
+                elif life_stage == 5:
+                    urgency += 0.10
                     life_stage_bonus = 0.03
 
-            # 3. FOMO (Fear Of Missing Out) - 덧셈 기반으로 변경
+            self.buy_score_lifecycle[i] = urgency + life_stage_bonus
+
+    @ti.kernel
+    def compute_behavioral_signals(
+        self,
+        pt_alpha: ti.f32,
+        pt_beta: ti.f32,
+        pt_gamma_gain: ti.f32,
+    ):
+        """[에이전트 모듈] FOMO/군집행동/전망이론/기대수익
+
+        결과: buy_score_behavioral
+        """
+        for i in range(self.n):
+            target = self.target_region[i]
+            region = self.region[i]
+            owned = self.owned_houses[i]
+            expectation = self.price_expectation[i]
+            risk = self.risk_tolerance[i]
+            fomo_sens = self.fomo_sensitivity[i]
+            herding = self.herding_tendency[i]
+            loss_aversion_coef = self.loss_aversion[i]
+            beta = self.discount_beta[i]
+            delta = self.discount_delta[i]
+
+            price_trend = self.region_price_trend_6m[target]
+
+            # FOMO
             fomo_bonus = 0.0
-            if price_trend > 0.05:  # 6개월간 5% 이상 상승
-                # FOMO: 덧셈 방식, 최대값 제한
+            if price_trend > 0.05:
                 excess_rise = price_trend - 0.05
-                fomo_bonus = fomo_sens * excess_rise * 3.0  # 배율 축소
-                fomo_bonus = ti.min(fomo_bonus, 0.3)  # 최대 0.3
-            elif price_trend > 0.02:  # 2-5% 상승
+                fomo_bonus = fomo_sens * excess_rise * 3.0
+                fomo_bonus = ti.min(fomo_bonus, 0.3)
+            elif price_trend > 0.02:
                 fomo_bonus = fomo_sens * (price_trend - 0.02) * 1.5
                 fomo_bonus = ti.min(fomo_bonus, 0.15)
 
-            # 4. 군집 행동 (Herding) - 덧셈 기반으로 변경
+            # 군집 행동
             herding_bonus = 0.0
             region_buying = self.region_buy_rate[region]
-            if region_buying > 0.03:  # 지역 내 3% 이상이 매수 시도
+            if region_buying > 0.03:
                 herding_bonus = herding * (region_buying - 0.03) * 3.0
-                herding_bonus = ti.min(herding_bonus, 0.2)  # 최대 0.2
+                herding_bonus = ti.min(herding_bonus, 0.2)
 
-            # 5. 기대 수익 (Hyperbolic Discounting 적용)
+            # 기대 수익 (쌍곡선 할인)
             expected_return_bonus = 0.0
             if owned >= 1:
-                # 월간 기대 수익률 (가격상승 + 임대수익)
                 monthly_appreciation = expectation * 0.01
                 rental_yield = 0.003
-
                 horizon = 60
                 discounted_return = expected_investment_return(
                     monthly_appreciation, rental_yield, horizon, beta, delta
                 )
-                expected_return_bonus = discounted_return * risk * 0.05  # 축소
+                expected_return_bonus = discounted_return * risk * 0.05
 
-            # 6. Prospect Theory 기반 이득 기대 평가 - 덧셈 기반
+            # Prospect Theory 이득 기대
             pt_bonus = 0.0
-            expected_gain = price_trend * price
-            pt_value = prospect_value(expected_gain / price, pt_alpha, pt_beta, loss_aversion_coef)
-
+            pt_value = prospect_value(price_trend, pt_alpha, pt_beta, loss_aversion_coef)
             rise_prob = 0.5 + expectation * 0.3
             rise_prob = ti.math.clamp(rise_prob, 0.1, 0.9)
             weighted_prob = probability_weight(rise_prob, pt_gamma_gain)
-
             if pt_value > 0:
-                pt_bonus = weighted_prob * pt_value * 0.05  # 덧셈 방식
+                pt_bonus = weighted_prob * pt_value * 0.05
                 pt_bonus = ti.min(pt_bonus, 0.15)
 
-            # 7. 가격 적정성 보너스/페널티 (구조적 개선)
-            # PIR(소득대비가격비)과 역사적 평균 대비 현재가 기반
-            # 고자산가(상위 20%)는 PIR 페널티 완화 - 프리미엄 지역 감당 가능
+            self.buy_score_behavioral[i] = fomo_bonus + herding_bonus + expected_return_bonus + pt_bonus
+
+    @ti.kernel
+    def compute_market_signals(self, wealthy_threshold: ti.f32):
+        """[일자리/환경 모듈] 일자리 밀도 + 프리미엄 + 가격 적정성
+
+        결과: buy_score_market
+        region_job_density는 JobMarket에서 동적으로 갱신됨
+        """
+        for i in range(self.n):
+            target = self.target_region[i]
+            agent_type = self.agent_type[i]
+            asset = self.asset[i]
+
+            pir = self.region_pir[target]
+            price_to_hist = self.region_price_to_hist[target]
+            prestige = self.region_prestige[target]
+            job_density = self.region_job_density[target]  # 동적 값
+
+            is_wealthy = 1 if asset >= wealthy_threshold else 0
+
+            # 가격 적정성 보너스/페널티
             valuation_bonus = 0.0
-
-            # is_wealthy는 이미 DSR 계산에서 정의됨 (wealthy_threshold 기준)
-
-            # PIR 기반: 10 이하 적정(보너스), 15 이상 고평가(페널티)
             if pir < 10.0:
-                valuation_bonus += (10.0 - pir) * 0.01  # 적정가 보너스
+                valuation_bonus += (10.0 - pir) * 0.01
             elif pir > 15.0:
-                # 고자산가는 PIR 페널티 50% 감소 (프리미엄 지역 감당 가능)
                 pir_penalty = (pir - 15.0) * 0.02
                 if is_wealthy == 1:
-                    pir_penalty *= 0.5  # 페널티 50% 감소
+                    pir_penalty *= 0.5
                 valuation_bonus -= pir_penalty
 
-            # 역사적 평균 대비: 1.0 이하 저평가(보너스), 1.2 이상 고평가(페널티)
             if price_to_hist < 1.0:
-                valuation_bonus += (1.0 - price_to_hist) * 0.1  # 저평가 보너스
+                valuation_bonus += (1.0 - price_to_hist) * 0.1
             elif price_to_hist > 1.2:
                 hist_penalty = (price_to_hist - 1.2) * 0.15
                 if is_wealthy == 1:
-                    hist_penalty *= 0.5  # 고자산가는 페널티 50% 감소
+                    hist_penalty *= 0.5
                 valuation_bonus -= hist_penalty
-
             valuation_bonus = ti.math.clamp(valuation_bonus, -0.15, 0.15)
 
-            # ================================================================
-            # 8. 일자리 밀도 보너스 (주거 수요의 핵심 요인) - 가중치 강화
-            # ================================================================
-            # 논리적 우선순위: job > FOMO > prestige
-            # 근거: 출퇴근은 필수, 심리적 선호는 부가요소
-            # 참고: 이창무 외 (2019), "일자리 접근성이 주택가격에 미치는 영향"
-            #
-            # 가중치 재조정 (2026):
-            # - 기존: job 0.15, prestige 0.15 (동등)
-            # - 변경: job 0.22, prestige 0.05 (job > prestige)
-            # ================================================================
-            job_bonus = job_density * 0.22  # 일자리 밀도에 비례 (최대 0.22)
-
-            # 실수요자(agent_type=0)는 일자리 중요성 더 높음 (출퇴근 필수)
-            # 투자자/투기자는 임대수익/시세차익이 목적이므로 일자리 덜 중요
+            # 일자리 밀도 보너스 (동적)
+            job_bonus = job_density * 0.22
             if agent_type == 0:
-                job_bonus *= 1.3  # 실수요자: 최대 0.286
+                job_bonus *= 1.3
 
-            # ================================================================
-            # 9. 심리적 프리미엄 보너스 (Prestige Effect) - 가중치 축소
-            # ================================================================
-            # 프리미엄은 "부가 요소"이지 "필수 요인"이 아님
-            # 기존 가중치가 job과 동등하거나 더 높았던 문제 수정
-            # (agent_type은 DSR 계산에서 이미 정의됨)
-            prestige_bonus = prestige * 0.04  # 기본 심리적 프리미엄 (최대 0.04)
-
-            if agent_type == 1:  # 투자자: 프리미엄 지역 임대수익 기대
+            # 심리적 프리미엄
+            prestige_bonus = prestige * 0.04
+            if agent_type == 1:
                 prestige_bonus = prestige * 0.06
-            elif agent_type == 2:  # 투기자: 프리미엄 지역 시세차익 기대
+            elif agent_type == 2:
                 prestige_bonus = prestige * 0.08
-
-            # 고자산가는 프리미엄 지역 선호도 더 강함 (1.3배로 축소)
-            # "똘똘한 한채" 심리는 있지만 일자리보다 중요하지 않음
             if is_wealthy == 1:
-                prestige_bonus *= 1.3  # 최대 0.104 (기존 0.225에서 축소)
+                prestige_bonus *= 1.3
 
-            # 10. 다주택 규제 정책 (똘똘한 한채의 핵심 원인)
-            # 한국의 다주택자 규제는 매우 강력함:
-            # - 취득세: 2주택 8%, 3주택+ 12%
-            # - 종부세: 다주택 합산 과세
-            # - 양도세: 다주택 중과세 (최대 75%)
-            # - 대출: 2주택 LTV 30%, 3주택+ 대출 불가
-            # 이 정책들로 인해 "1채를 좋은 곳에" 전략이 합리적
+            self.buy_score_market[i] = valuation_bonus + job_bonus + prestige_bonus
+
+    @ti.kernel
+    def compute_policy_penalty(self):
+        """[환경 모듈] 다주택 규제 정책 페널티
+
+        결과: buy_score_policy
+        """
+        for i in range(self.n):
+            owned = self.owned_houses[i]
+            agent_type = self.agent_type[i]
             policy_penalty = 0.0
 
-            if owned >= 2:  # 2주택 이상: 추가 매수 거의 불가능
-                # 취득세 12% + 종부세 + 양도세 중과 + 대출 불가
-                # → 투자 수익성 없음, 사실상 매수 포기
-                policy_penalty = 1.5  # buy_threshold(0.4)보다 훨씬 큼 → 거의 매수 안함
-
-            elif owned == 1:  # 1주택자: 추가 매수 vs 갈아타기 구분
-                # "추가 매수"는 8% 취득세로 매우 억제됨
-                # "갈아타기"는 기존 주택 매도 후 → wants_to_sell=1이어야 함
+            if owned >= 2:
+                policy_penalty = 1.5
+            elif owned == 1:
                 if self.wants_to_sell[i] == 0:
-                    # 갈아타기가 아닌 순수 추가 매수
-                    # → 8% 취득세 + 종부세 + 양도세 중과 = 거의 안함
-                    policy_penalty = 0.6  # 강한 억제
-
-                    # 투자자/투기자만 약간의 여지 (하지만 여전히 큰 부담)
-                    if agent_type == 1:  # 투자자
+                    policy_penalty = 0.6
+                    if agent_type == 1:
                         policy_penalty = 0.4
-                    elif agent_type == 2:  # 투기자
+                    elif agent_type == 2:
                         policy_penalty = 0.35
                 else:
-                    # 갈아타기 (기존 주택 팔고 새로 사는 것)
-                    # → 1% 취득세만 적용, 정상적인 결정
                     policy_penalty = 0.05
 
-            # 11. 최종 매수 점수 계산 (DSR 기반 통일 체계)
-            # DSR이 한도 이내여야 구매 가능 (is_affordable == 1)
-            if is_affordable == 1:
-                # DSR이 낮을수록 보너스 (여유 있음)
-                dsr_bonus = ti.max(0.0, (dsr_limit - dsr) * 0.3)  # DSR이 한도보다 낮을수록 보너스
-                dsr_bonus = ti.min(dsr_bonus, 0.15)  # 최대 0.15
+            self.buy_score_policy[i] = policy_penalty
 
-                buy_score = (urgency + life_stage_bonus + fomo_bonus + herding_bonus +
-                            expected_return_bonus + pt_bonus + dsr_bonus +
-                            valuation_bonus + prestige_bonus + job_bonus -
-                            policy_penalty)
+    @ti.kernel
+    def finalize_buy_sell_decision(
+        self,
+        region_prices: ti.template(),
+        buy_threshold: ti.f32,
+        sell_threshold: ti.f32,
+        transfer_tax_multi: ti.f32,
+        jongbu_rate: ti.f32,
+        jongbu_threshold: ti.f32,
+        pt_alpha: ti.f32,
+        pt_beta: ti.f32,
+        pt_gamma_gain: ti.f32,
+    ):
+        """최종 매수/매도 결정
 
-            # 확률적 결정 (노이즈 추가)
+        모든 중간 점수를 합산하고, 다주택 투자 수익성 + 매도 결정
+        """
+        for i in range(self.n):
+            owned = self.owned_houses[i]
+            income = self.income[i]
+            asset = self.asset[i]
+            target = self.target_region[i]
+            agent_type = self.agent_type[i]
+            expectation = self.price_expectation[i]
+            life_stage = self.life_stage[i]
+            age = self.age[i]
+            eldest_child = self.eldest_child_age[i]
+            loss_aversion_coef = self.loss_aversion[i]
+            purchase_price_val = self.purchase_price[i]
+
+            price = region_prices[target]
+            price_trend = self.region_price_trend_6m[target]
+
+            # === 매수 점수 합산 ===
+            buy_score = 0.0
+            if self.is_affordable_flag[i] == 1:
+                buy_score = (self.buy_score_affordability[i] +
+                            self.buy_score_lifecycle[i] +
+                            self.buy_score_behavioral[i] +
+                            self.buy_score_market[i] -
+                            self.buy_score_policy[i])
+
+            # 노이즈
             seed = self.rand_seed[i]
             noise = ti.cast((seed % 1000) - 500, ti.f32) / 10000.0
             self.rand_seed[i] = (seed * 1103515245 + 12345) % 2147483647
 
-            # ================================================================
-            # 다주택 매수 의사결정 (비용 기반 경제적 합리성)
-            # ================================================================
-            # 기존의 하드코딩된 확률(5%, 3%, 1%)을 폐지하고
-            # 실제 세금 비용과 예상 수익을 비교하여 결정
-            #
-            # 투자 수익성 = 예상 수익 - (취득세 + 종부세 + 양도세)
-            # 수익성 > 0 이고 buy_score > threshold 이면 매수
-            # 수익성 <= 0 이면 매수하지 않음 (세금이 수익보다 큼)
-            # ================================================================
+            # === 다주택 투자 수익성 계산 ===
+            monthly_appreciation = expectation * 0.01 + 0.002
+            monthly_appreciation = ti.math.clamp(monthly_appreciation, -0.01, 0.03)
+
+            holding_period = 60
+            if agent_type == 2:
+                holding_period = self.speculation_horizon[i]
+            elif agent_type == 1:
+                holding_period = 84
+
+            rental_yield = 0.003
+            current_total_value = self.total_purchase_price[i]
+
+            transfer_tax_rate = transfer_tax_multi
+            if owned == 0:
+                transfer_tax_rate = 0.40
+            elif holding_period < 24:
+                transfer_tax_rate = 0.70
 
             final_buy_decision = 0
 
-            # 투자 수익성 계산에 필요한 파라미터
-            # 월간 예상 가격 상승률 (기대에 기반)
-            monthly_appreciation = expectation * 0.01 + 0.002  # 기대 + 기본 상승률
-            monthly_appreciation = ti.math.clamp(monthly_appreciation, -0.01, 0.03)
-
-            # 예상 보유 기간 (에이전트 유형별)
-            holding_period = 60  # 기본 5년
-            if agent_type == 2:  # 투기자
-                holding_period = self.speculation_horizon[i]
-            elif agent_type == 1:  # 투자자
-                holding_period = 84  # 7년
-
-            # 임대 수익률 (연 3.6% = 월 0.3%)
-            rental_yield = 0.003
-
-            # 현재 보유 주택 총 가치 (구매 가격 기준)
-            current_total_value = self.total_purchase_price[i]
-
-            # 양도세율 (보유 기간과 주택 수에 따라 차등)
-            transfer_tax_rate = transfer_tax_multi  # 다주택 양도세율 (기본)
             if owned == 0:
-                transfer_tax_rate = 0.40  # 1주택 (장기보유)
-            elif holding_period < 24:  # 2년 미만 단기
-                transfer_tax_rate = 0.70  # 단기 양도세
-
-            if owned == 0:  # 무주택자: 정상적인 매수 결정
                 final_buy_decision = 1 if (buy_score + noise) > buy_threshold else 0
 
-            elif owned == 1:  # 1주택자: 갈아타기 vs 추가 매수 구분
-                # 생애주기상 갈아타기 이유: 학군 이동, 넓은 집, 다운사이징
+            elif owned == 1:
                 has_lifecycle_reason = (life_stage == 2) or (life_stage == 3) or (life_stage == 5)
-
                 if has_lifecycle_reason:
-                    # 갈아타기 목적: 정상적인 매수 결정 (1주택 → 1주택)
                     final_buy_decision = 1 if (buy_score + noise) > buy_threshold else 0
-
-                    # ================================================
-                    # 갈아타기 = 동시 매도 강제 (핵심 수정)
-                    # ================================================
-                    # 갈아타기는 "기존 집을 팔고 새 집을 사는 것"
-                    # wants_to_buy=1이면 wants_to_sell=1도 반드시 함께 설정
-                    # 이렇게 하지 않으면 1주택자가 2주택자가 되어버림
                     if final_buy_decision == 1:
-                        self.wants_to_sell[i] = 1  # 갈아타기 시 매도 강제
+                        self.wants_to_sell[i] = 1
                 else:
-                    # 투자 목적 추가 매수 (1주택 → 2주택)
-                    # 비용 기반 의사결정: 수익성 계산
                     profitability = calculate_investment_profitability(
-                        price,
-                        2,  # 매수 후 2주택
-                        monthly_appreciation,
-                        holding_period,
-                        rental_yield,
-                        jongbu_threshold,  # 1주택 종부세 기준 (여기선 다주택 기준 사용)
-                        jongbu_threshold * 0.55,  # 다주택 기준 = 1주택 기준의 약 55% (11억 → 6억)
-                        jongbu_rate,
-                        transfer_tax_rate,
-                        current_total_value
+                        price, 2, monthly_appreciation, holding_period, rental_yield,
+                        jongbu_threshold, jongbu_threshold * 0.55, jongbu_rate,
+                        transfer_tax_rate, current_total_value
                     )
-
-                    # 수익성이 양수이고 buy_score도 충분하면 매수
                     if profitability > 0 and (buy_score + noise) > buy_threshold:
                         final_buy_decision = 1
-                    else:
-                        final_buy_decision = 0
 
-            elif owned == 2:  # 2주택자: 3주택 취득 시 12% 취득세
-                # 비용 기반 의사결정
+            elif owned == 2:
                 profitability = calculate_investment_profitability(
-                    price,
-                    3,  # 매수 후 3주택
-                    monthly_appreciation,
-                    holding_period,
-                    rental_yield,
-                    jongbu_threshold,
-                    jongbu_threshold * 0.55,
-                    jongbu_rate,
-                    transfer_tax_rate,
-                    current_total_value
+                    price, 3, monthly_appreciation, holding_period, rental_yield,
+                    jongbu_threshold, jongbu_threshold * 0.55, jongbu_rate,
+                    transfer_tax_rate, current_total_value
                 )
-
-                # 수익성이 양수이고 buy_score도 충분하면 매수
-                # 3주택은 세금 부담이 커서 수익성이 양수가 되기 어려움
                 if profitability > 0 and (buy_score + noise) > buy_threshold:
                     final_buy_decision = 1
-                else:
-                    final_buy_decision = 0
 
-            else:  # 3주택 이상: 12% 취득세 + 대출 불가
-                # 비용 기반 의사결정
+            else:
                 profitability = calculate_investment_profitability(
-                    price,
-                    owned + 1,  # 매수 후 주택 수
-                    monthly_appreciation,
-                    holding_period,
-                    rental_yield,
-                    jongbu_threshold,
-                    jongbu_threshold * 0.55,
-                    jongbu_rate,
-                    transfer_tax_rate,
-                    current_total_value
+                    price, owned + 1, monthly_appreciation, holding_period, rental_yield,
+                    jongbu_threshold, jongbu_threshold * 0.55, jongbu_rate,
+                    transfer_tax_rate, current_total_value
                 )
-
-                # 수익성이 매우 높아야만 매수 (buy_threshold의 1.5배)
                 if profitability > 0 and (buy_score + noise) > buy_threshold * 1.5:
                     final_buy_decision = 1
-                else:
-                    final_buy_decision = 0
 
             self.wants_to_buy[i] = final_buy_decision
-            # target_region은 select_target_regions()에서 별도 설정
 
-            # === 매도 의사결정 (덧셈 기반 + 배율 보정) ===
+            # === 매도 의사결정 ===
             sell_score = 0.0
 
             if owned >= 1:
-                # 현재 가치 대비 이익/손실 계산
                 current_value = price
                 gain_loss = 0.0
                 gain_loss_ratio = 0.0
@@ -1755,87 +1705,58 @@ class Households:
                     gain_loss = current_value - purchase_price_val
                     gain_loss_ratio = gain_loss / purchase_price_val
 
-                # 1. Prospect Theory 가치 함수 적용 (손실 회피)
-                normalized_gain_loss = gain_loss_ratio
-
+                # Prospect Theory 손실 회피
                 pt_sell_value = prospect_value(
-                    normalized_gain_loss,
-                    pt_alpha,
-                    pt_beta,
-                    loss_aversion_coef
+                    gain_loss_ratio, pt_alpha, pt_beta, loss_aversion_coef
                 )
-
-                # 손실 상태에서의 매도 확률 감소 (덧셈 기반 페널티)
                 loss_penalty = 0.0
                 if pt_sell_value < 0:
-                    # 손실의 주관적 가치에 비례한 페널티
                     loss_penalty = ti.min(-pt_sell_value * 0.3, 0.4)
 
-                # 2. 앵커링 (Anchoring) - 페널티 방식 유지
+                # 앵커링
                 anchoring_penalty = 0.0
                 if gain_loss_ratio < 0.1:
                     anchoring_penalty = (0.1 - gain_loss_ratio) * 0.3
 
                 if owned >= 2:  # 다주택자
-                    # ================================================================
-                    # 다주택자 매도 로직 수정 (2026-02-06)
-                    # 기존: 양도세 낮을 때 bonus → 수정: 양도세 높을 때 penalty
-                    # 근거: 양도세가 높으면 매도 억제, 낮으면 매도 유인
-                    # ================================================================
-
-                    # 1. 보유 비용 압박 (종부세)
                     total_value = price * ti.cast(owned, ti.f32)
                     holding_cost = 0.0
                     if total_value > jongbu_threshold:
                         holding_cost = (total_value - jongbu_threshold) * jongbu_rate / 12.0
-
                     holding_burden = holding_cost / income if income > 0 else 0.0
-                    # 종부세 부담이 소득의 일정 비율 이상일 때만 매도 유인
                     holding_bonus = 0.0
-                    if holding_burden > 0.05:  # 소득의 5% 이상 부담시
+                    if holding_burden > 0.05:
                         holding_bonus = ti.min((holding_burden - 0.05) * 0.2, 0.10)
 
-                    # 2. 양도세 페널티 (수정: bonus → penalty)
-                    # 양도세가 높으면 매도 억제 (기존 로직 반대)
-                    # transfer_tax_multi가 0.5 (50%) 이상이면 페널티
                     tax_penalty = 0.0
                     if transfer_tax_multi > 0.5:
-                        tax_penalty = (transfer_tax_multi - 0.5) * 0.3  # 최대 0.15
+                        tax_penalty = (transfer_tax_multi - 0.5) * 0.3
 
-                    # 3. 기대 수익 하락 시 매도 고려 (조건 강화)
-                    # 기존: < -0.1 → 수정: < -0.3 (더 강한 하락 기대시만)
                     expectation_bonus = 0.0
                     if expectation < -0.3:
-                        expectation_bonus = 0.10  # 0.15 → 0.10
+                        expectation_bonus = 0.10
 
-                    # 4. 충분한 이익 실현 시 매도 고려 (유지)
                     profit_bonus = 0.0
                     if gain_loss_ratio > 0.3:
                         certainty_bonus = probability_weight(0.9, pt_gamma_gain) * 0.10
-                        profit_bonus = 0.08 + certainty_bonus  # 0.12 → 0.08
+                        profit_bonus = 0.08 + certainty_bonus
 
-                    # 5. 최종 매도 점수 (덧셈 - 페널티)
                     sell_score = (holding_bonus + expectation_bonus + profit_bonus
                                  - tax_penalty - loss_penalty - anchoring_penalty)
 
-                elif owned == 1:  # 1주택자 (갈아타기 목적만)
+                elif owned == 1:
                     base_sell = 0.0
-                    if life_stage == 3 and eldest_child >= 10:  # 학군 이동
+                    if life_stage == 3 and eldest_child >= 10:
                         base_sell = 0.1
-                    elif life_stage == 5:  # 은퇴 후 현금화
+                    elif life_stage == 5:
                         if age >= 60:
                             base_sell = 0.08
                             if gain_loss_ratio > 0.5:
                                 base_sell += 0.1
-
-                    # 1주택자는 손실 회피 더 강함
                     sell_score = base_sell - loss_penalty * 1.5 - anchoring_penalty
 
-            # 하락장에서 매물 잠김 현상 (감소 방식)
             if price_trend < -0.03:
-                sell_score -= 0.15  # 덧셈 기반 페널티
-
-            # 음수 방지
+                sell_score -= 0.15
             sell_score = ti.max(sell_score, 0.0)
 
             self.wants_to_sell[i] = 1 if sell_score > sell_threshold else 0
@@ -1869,13 +1790,32 @@ class Households:
                 self.homeless_months[i] = 0
 
     @ti.kernel
-    def update_assets(self, income_growth: ti.f32, savings_rate: ti.f32):
-        """자산 업데이트 (저축)"""
+    def update_assets(self, savings_rate: ti.f32, min_living_cost: ti.f32,
+                      mortgage_rate_monthly: ti.f32):
+        """자산 업데이트 (저축/소진)
+
+        취업자: 소득의 savings_rate만큼 저축 (대출이자 차감 후)
+        실업자: 생활비 + 대출이자로 자산 소진
+        소득 성장은 JobMarket에서 처리 (기존 uniform 성장 제거)
+        """
         for i in range(self.n):
-            monthly_saving = self.income[i] * savings_rate
-            self.asset[i] += monthly_saving
-            # 소득 성장 (연 단위를 월 단위로)
-            self.income[i] *= (1.0 + income_growth / 12.0)
+            # 대출이자 (취업/실업 무관하게 납부)
+            mortgage_payment = self.mortgage_balance[i] * mortgage_rate_monthly
+
+            if self.employment_status[i] == 0:  # 취업
+                net_income = self.income[i] - mortgage_payment - min_living_cost
+                if net_income > 0.0:
+                    self.asset[i] += net_income * savings_rate
+                else:
+                    self.asset[i] += net_income  # 적자분 자산에서 차감
+            else:  # 실업 (급여 수령 또는 무급)
+                # 총 비용 = 생활비 + 대출이자
+                total_cost = min_living_cost + mortgage_payment
+                shortfall = ti.max(total_cost - self.income[i], 0.0)
+                self.asset[i] -= shortfall
+
+            # 자산 하한 (완전 파산 방지 - 최소 0)
+            self.asset[i] = ti.max(self.asset[i], 0.0)
 
     @ti.kernel
     def update_yearly_aging(self):

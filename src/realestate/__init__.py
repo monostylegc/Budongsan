@@ -25,6 +25,7 @@ from .config import (
 )
 from .macro import MacroModel
 from .supply import SupplyModel
+from .jobs import JobMarket
 from .order_book import OrderBook
 
 __all__ = [
@@ -40,5 +41,6 @@ __all__ = [
     "NetworkConfig",
     "MacroModel",
     "SupplyModel",
+    "JobMarket",
     "OrderBook",
 ]

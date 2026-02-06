@@ -33,61 +33,37 @@ export interface PolicyParams {
 
 // 행동경제학 파라미터 (분포 지원)
 export interface BehavioralParams {
-  // FOMO (분포)
-  fomo_sensitivity: DistParam;     // FOMO 민감도
-  fomo_trigger_threshold: number;  // 발동 임계값 (환경)
-
-  // 손실 회피 (분포)
+  fomo_sensitivity: DistParam;
+  fomo_trigger_threshold: number;
   loss_aversion: DistParam;
-
-  // 앵커링 (분포)
   anchoring_strength: DistParam;
-  anchoring_threshold: number;     // 발동 이익률 (환경)
-
-  // 군집 행동 (분포)
+  anchoring_threshold: number;
   herding_tendency: DistParam;
-  herding_trigger: number;         // 발동 비율 (환경)
-
-  // 위험 허용도 (분포)
+  herding_trigger: number;
   risk_tolerance: DistParam;
-
-  // 시간 할인 (분포) - 현재 편향
-  present_bias: DistParam;         // beta (0.5~1.0)
-
-  // 사회적 학습
+  present_bias: DistParam;
   social_learning_rate: number;
   news_impact: number;
 }
 
 // 에이전트 구성 파라미터
 export interface AgentCompositionParams {
-  // 유형 비율
   investor_ratio: number;
   speculator_ratio: number;
-
-  // 투기자 특성
   speculator_risk_multiplier: number;
   speculator_fomo_multiplier: number;
   speculator_horizon_min: number;
   speculator_horizon_max: number;
-
-  // 초기 주택 보유
   initial_homeless_rate: number;
   initial_one_house_rate: number;
   initial_multi_house_rate: number;
-
-  // 소득 분포 (로그정규)
-  income_median: number;      // 중위값 (만원/월)
-  income_sigma: number;       // 로그 표준편차 (분산도)
-
-  // 자산 분포 (파레토)
-  asset_median: number;       // 중위값 (만원)
-  asset_alpha: number;        // 파레토 알파 (낮을수록 불평등)
-
-  // 연령 분포
-  age_young_ratio: number;    // 25-34세 비율
-  age_middle_ratio: number;   // 35-54세 비율
-  age_senior_ratio: number;   // 55세+ 비율
+  income_median: number;
+  income_sigma: number;
+  asset_median: number;
+  asset_alpha: number;
+  age_young_ratio: number;
+  age_middle_ratio: number;
+  age_senior_ratio: number;
 }
 
 // 생애주기 파라미터
@@ -189,8 +165,6 @@ export interface Transaction {
   region_name: string;
   count: number;
   avg_price: number;
-  lat: number;
-  lng: number;
 }
 
 // 월별 상태
@@ -210,6 +184,8 @@ export interface MonthlyState {
   mean_building_age: number;
   mean_building_condition: number;
   demolished_count: number;
+  unemployment_rate: number;
+  at_risk_households: number;
   regions: RegionStats[];
   recent_transactions: Transaction[];
 }
@@ -234,16 +210,39 @@ export interface SimulationSummary {
 
 export type SimulationStatus = 'idle' | 'connecting' | 'initializing' | 'running' | 'paused' | 'completed' | 'error' | 'stopped';
 
-// 지역 좌표
-export const REGION_COORDS: Record<number, { lat: number; lng: number }> = {
-  0: { lat: 37.517, lng: 127.047 }, 1: { lat: 37.556, lng: 127.010 },
-  2: { lat: 37.570, lng: 126.977 }, 3: { lat: 37.359, lng: 127.105 },
-  4: { lat: 37.275, lng: 127.009 }, 5: { lat: 37.742, lng: 127.047 },
-  6: { lat: 37.456, lng: 126.705 }, 7: { lat: 35.180, lng: 129.076 },
-  8: { lat: 35.871, lng: 128.602 }, 9: { lat: 35.160, lng: 126.851 },
-  10: { lat: 36.351, lng: 127.385 }, 11: { lat: 36.480, lng: 127.289 },
-  12: { lat: 35.800, lng: 127.800 },
-};
+// 게임맵 타일 레이아웃 (한반도 근사 배치)
+export interface TileInfo {
+  id: number;
+  label: string;
+  col: number;
+  row: number;
+}
+
+export const TILE_LAYOUT: TileInfo[] = [
+  // 서울권 (상단 밀집)
+  { id: 5, label: '경기북', col: 1, row: 0 },
+  { id: 2, label: '기타서울', col: 2, row: 0 },
+  { id: 6, label: '인천', col: 0, row: 1 },
+  { id: 1, label: '마용성', col: 2, row: 1 },
+  { id: 0, label: '강남3구', col: 3, row: 1 },
+  { id: 4, label: '경기남', col: 1, row: 2 },
+  { id: 3, label: '분당판교', col: 2, row: 2 },
+  // 중부
+  { id: 10, label: '대전', col: 2, row: 3 },
+  { id: 11, label: '세종', col: 3, row: 3 },
+  // 남부
+  { id: 8, label: '대구', col: 3, row: 4 },
+  { id: 9, label: '광주', col: 1, row: 5 },
+  { id: 12, label: '기타지방', col: 2, row: 5 },
+  { id: 7, label: '부산', col: 3, row: 5 },
+];
+
+// 지역 인접 관계 (풍선효과 연결선)
+export const ADJACENCY: [number, number][] = [
+  [0, 1], [0, 3], [1, 2], [2, 5], [2, 6],
+  [3, 4], [4, 5], [4, 6], [4, 10],
+  [7, 8], [8, 10], [9, 12], [10, 11], [10, 12],
+];
 
 export const REGION_NAMES: Record<number, string> = {
   0: '강남3구', 1: '마용성', 2: '기타서울', 3: '분당판교',

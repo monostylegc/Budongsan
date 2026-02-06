@@ -271,6 +271,23 @@ class SimulationRunner:
         # 전체 통계
         stats = sim.stats_history[-1] if sim.stats_history else {}
 
+        # 고용 통계
+        unemployment_rate = stats.get('unemployment_rate', 0.0)
+        if hasattr(sim, 'job_market'):
+            try:
+                job_state = sim.job_market.get_state_dict()
+                unemployment_rate = job_state.get('avg_unemployment_rate', unemployment_rate)
+            except Exception:
+                pass
+
+        # 강제매도 위험 가구 수
+        at_risk_households = 0
+        try:
+            countdown = sim.households.forced_sale_countdown.to_numpy()
+            at_risk_households = int(np.sum(countdown >= 0))
+        except Exception:
+            at_risk_households = stats.get('at_risk_count', 0)
+
         return {
             'month': month,
             'year': month // 12 + 1,
@@ -287,6 +304,8 @@ class SimulationRunner:
             'mean_building_age': stats.get('mean_building_age', 15),
             'mean_building_condition': stats.get('mean_building_condition', 0.7),
             'demolished_count': stats.get('demolished_houses', 0),
+            'unemployment_rate': float(unemployment_rate),
+            'at_risk_households': int(at_risk_households),
             'regions': regions_data,
             'recent_transactions': recent_trans,
         }
@@ -308,7 +327,7 @@ class SimulationRunner:
         return distribution
 
     def _get_recent_transactions(self, limit: int = 50) -> list:
-        """최근 거래 내역 (지도 표시용)"""
+        """최근 거래 내역"""
         transactions = self.sim.market.transactions.to_numpy()
         prices = self.sim.market.region_prices.to_numpy()
 
@@ -316,36 +335,14 @@ class SimulationRunner:
         for r in range(NUM_REGIONS):
             if transactions[r] > 0:
                 region_info = REGIONS[r]
-                coords = self._get_region_coords(r)
                 recent.append({
                     'region_id': r,
                     'region_name': region_info['name'],
                     'count': int(transactions[r]),
                     'avg_price': float(prices[r]),
-                    'lat': coords['lat'],
-                    'lng': coords['lng'],
                 })
 
         return recent
-
-    def _get_region_coords(self, region_id: int) -> Dict[str, float]:
-        """지역 중심 좌표 반환"""
-        coords = {
-            0: {'lat': 37.517, 'lng': 127.047},
-            1: {'lat': 37.556, 'lng': 127.010},
-            2: {'lat': 37.570, 'lng': 126.977},
-            3: {'lat': 37.359, 'lng': 127.105},
-            4: {'lat': 37.275, 'lng': 127.009},
-            5: {'lat': 37.742, 'lng': 127.047},
-            6: {'lat': 37.456, 'lng': 126.705},
-            7: {'lat': 35.180, 'lng': 129.076},
-            8: {'lat': 35.871, 'lng': 128.602},
-            9: {'lat': 35.160, 'lng': 126.851},
-            10: {'lat': 36.351, 'lng': 127.385},
-            11: {'lat': 36.480, 'lng': 127.289},
-            12: {'lat': 35.800, 'lng': 127.800},
-        }
-        return coords.get(region_id, {'lat': 36.5, 'lng': 127.5})
 
     def _get_summary(self, results: Dict[str, Any]) -> Dict[str, Any]:
         """시뮬레이션 결과 요약"""
@@ -378,17 +375,28 @@ class SimulationRunner:
 
 
 def get_scenario_presets() -> Dict[str, Any]:
-    """시나리오 프리셋 목록 반환 (딕셔너리 형태)"""
+    """시나리오 프리셋 목록 반환"""
     return {
-        "default": {
-            "name": "기본값",
-            "description": "시뮬레이션 기본 설정",
-            "params": {}
-        },
-        "korea_reality": {
-            "name": "한국 현실",
-            "description": "2024년 한국 통계 기반 설정",
+        "korea_2026": {
+            "name": "한국 현실 2026",
+            "description": "기준금리 2.5%, GDP 1.5%, 현행 규제 유지",
             "params": {
+                "num_households": 30000,
+                "num_houses": 24600,
+                "num_steps": 60,
+                "policy": {
+                    "interest_rate": 0.025,
+                    "mortgage_spread": 0.01,
+                    "ltv_1house": 0.40,
+                    "ltv_2house": 0.00,
+                    "ltv_3house": 0.00,
+                    "dti_limit": 0.40,
+                    "dsr_limit": 0.40,
+                },
+                "macro": {
+                    "gdp_growth_mean": 0.015,
+                    "gdp_growth_volatility": 0.01,
+                },
                 "agent_composition": {
                     "income_median": 350,
                     "income_sigma": 0.55,
@@ -397,48 +405,70 @@ def get_scenario_presets() -> Dict[str, Any]:
                     "initial_homeless_rate": 0.44,
                     "initial_one_house_rate": 0.41,
                     "initial_multi_house_rate": 0.15,
-                    "age_young_ratio": 0.35,
-                    "age_middle_ratio": 0.45,
-                    "age_senior_ratio": 0.20,
                     "investor_ratio": 0.18,
                     "speculator_ratio": 0.08,
-                }
+                },
             }
         },
-        "tight_reg": {
-            "name": "규제 강화",
-            "description": "LTV/DTI 규제 강화 시나리오",
+        "recession": {
+            "name": "경기 침체",
+            "description": "GDP -1%, 실업률 상승, 변동성 증가",
             "params": {
-                "policy": {
-                    "ltv_1house": 0.40,
-                    "ltv_2house": 0.20,
-                    "dti_limit": 0.35,
-                    "acq_tax_2house": 0.12,
-                    "jongbu_rate": 0.03,
-                }
+                "num_households": 30000,
+                "num_houses": 24600,
+                "num_steps": 60,
+                "policy": {"interest_rate": 0.025},
+                "macro": {
+                    "gdp_growth_mean": -0.01,
+                    "gdp_growth_volatility": 0.015,
+                },
             }
         },
-        "loose_reg": {
+        "deregulation": {
             "name": "규제 완화",
-            "description": "LTV/DTI 규제 완화 시나리오",
+            "description": "LTV 60%, 2주택 30%, 종부세 인하",
             "params": {
+                "num_households": 30000,
+                "num_houses": 24600,
+                "num_steps": 60,
                 "policy": {
-                    "ltv_1house": 0.70,
-                    "ltv_2house": 0.50,
+                    "interest_rate": 0.025,
+                    "ltv_1house": 0.60,
+                    "ltv_2house": 0.30,
                     "dti_limit": 0.50,
-                    "acq_tax_2house": 0.04,
                     "jongbu_rate": 0.01,
-                }
+                    "transfer_tax_multi_long": 0.40,
+                },
             }
         },
-        "supply_crisis": {
-            "name": "공급 부족",
-            "description": "주택 공급 급감 시나리오",
+        "rate_cut": {
+            "name": "금리 인하",
+            "description": "기준금리 1.5%, 주담대 2.5%",
             "params": {
-                "supply": {
-                    "base_supply_rate": 0.0003,
-                    "elasticity_gangnam": 0.1,
-                }
+                "num_households": 30000,
+                "num_houses": 24600,
+                "num_steps": 60,
+                "policy": {
+                    "interest_rate": 0.015,
+                    "mortgage_spread": 0.01,
+                },
             }
-        }
+        },
+        "supply_cliff": {
+            "name": "공급 절벽",
+            "description": "공급률 50% 감소, 강남 공급 극히 제한",
+            "params": {
+                "num_households": 30000,
+                "num_houses": 24600,
+                "num_steps": 60,
+                "policy": {"interest_rate": 0.025},
+                "supply": {
+                    "base_supply_rate": 0.0005,
+                    "elasticity_gangnam": 0.15,
+                    "elasticity_seoul": 0.25,
+                    "elasticity_gyeonggi": 0.8,
+                    "redevelopment_base_prob": 0.0003,
+                },
+            }
+        },
     }
