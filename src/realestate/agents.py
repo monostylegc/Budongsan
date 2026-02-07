@@ -2,7 +2,7 @@
 
 import taichi as ti
 import numpy as np
-from .config import Config, NUM_REGIONS, REGION_HOUSEHOLD_RATIO, REGION_PRESTIGE, REGION_JOB_DENSITY
+from .config import Config, NUM_REGIONS, REGION_HOUSEHOLD_RATIO, REGION_PRESTIGE, REGION_JOB_DENSITY, ADJACENCY
 
 
 # =============================================================================
@@ -1077,7 +1077,9 @@ class Households:
         self.region_pir.from_numpy(pir.astype(np.float32))
         self.region_price_to_hist.from_numpy(price_to_hist.astype(np.float32))
         self.region_attractiveness.from_numpy(attractiveness.astype(np.float32))
-        self.region_prestige.from_numpy(REGION_PRESTIGE.astype(np.float32))
+        # 동적 프리미엄 사용 (market에서 매 스텝 업데이트)
+        dynamic_prestige = getattr(market, 'dynamic_prestige', REGION_PRESTIGE)
+        self.region_prestige.from_numpy(dynamic_prestige.astype(np.float32))
         # 동적 일자리 밀도 사용 (JobMarket 제공, 없으면 정적 값)
         effective_job_density = job_density if job_density is not None else REGION_JOB_DENSITY
         self.region_job_density.from_numpy(effective_job_density.astype(np.float32))
@@ -1124,17 +1126,22 @@ class Households:
                 effective_asset = asset
 
             if agent_type == 0:  # 실수요자
-                # 일자리가 있는 곳에 살아야 함 (출퇴근 필수)
+                # 후보 지역 선정: 인접 지역 + 고자산가만 원거리 이동 허용
                 candidates = self._get_adjacent_regions(home)
                 candidates.append(home)
 
-                # 일자리 밀도 높은 지역도 후보에 추가
-                high_job_regions = [r for r in range(NUM_REGIONS) if effective_job_density[r] >= 0.5]
-                candidates = list(set(candidates + high_job_regions))
-
-                # 고자산가는 프리미엄 지역도 고려
+                # 고자산가만 원거리(수도권↔지방) 이동 허용
                 if is_wealthy:
                     candidates = list(set(candidates + [0, 1, 3]))
+                    # 고소득 일자리 지역도 추가
+                    high_job_regions = [r for r in range(NUM_REGIONS) if effective_job_density[r] >= 0.5]
+                    candidates = list(set(candidates + high_job_regions))
+                else:
+                    # 일반 가구: 인접 + 가까운 고용 밀집 지역만
+                    for r in range(NUM_REGIONS):
+                        if effective_job_density[r] >= 0.5 and ADJACENCY[home][r] >= 0.3:
+                            candidates.append(r)
+                    candidates = list(set(candidates))
 
                 best_region = home
                 best_score = -999.0
@@ -1158,20 +1165,24 @@ class Households:
                     if not is_affordable:
                         continue  # DSR 초과 → 구매 불가
 
-                    # 점수 계산 (가중치 재조정: job > prestige)
-                    dsr_score = max(0, 1 - dsr) * 0.3  # DSR 0이면 0.3, DSR 1이면 0
+                    # 점수 계산 (가중치 재조정: prestige 비중 확대)
+                    dsr_score = max(0, 1 - dsr) * 0.25  # 25% (축소)
 
-                    # 일자리 밀도 점수 (핵심 요인) - 최고 가중치
-                    job_score = effective_job_density[r] * 0.5  # 최대 0.5
+                    # 일자리 밀도 점수 (축소)
+                    job_score = effective_job_density[r] * 0.35  # 35% (축소)
 
-                    # PIR 기반 점수
-                    pir_score = max(0, 1 - pir[r] / 30) * 0.15
+                    # PIR 기반 점수 (축소)
+                    pir_score = max(0, 1 - pir[r] / 30) * 0.10  # 10% (축소)
 
-                    # 프리미엄 지역 심리적 보너스 (축소: 부가 요소)
-                    prestige = REGION_PRESTIGE[r]
-                    prestige_bonus = prestige * (0.08 if is_wealthy else 0.04)  # 기존 0.2/0.1에서 축소
+                    # 동적 프리미엄 보너스 (대폭 확대: 15-20%)
+                    prestige = dynamic_prestige[r]
+                    prestige_bonus = prestige * (0.20 if is_wealthy else 0.15)
 
-                    score = dsr_score + job_score + pir_score + prestige_bonus
+                    # 이동 마찰 보너스 (가까울수록 유리, 10%)
+                    adjacency_score = ADJACENCY[home][r]
+                    mobility_bonus = adjacency_score * 0.10
+
+                    score = dsr_score + job_score + pir_score + prestige_bonus + mobility_bonus
 
                     if score > best_score:
                         best_score = score
@@ -1194,10 +1205,10 @@ class Households:
                     )
 
                 if np.sum(affordable_mask) > 0:
-                    # 투자매력도 + 프리미엄 가중 점수
+                    # 투자매력도 60% + 동적 프리미엄 40%
                     combined_score = np.where(
                         affordable_mask,
-                        attractiveness + REGION_PRESTIGE * 0.2,  # 프리미엄 지역 가중
+                        attractiveness * 0.6 + dynamic_prestige * 0.4,
                         -999
                     )
                     top_regions = np.argsort(combined_score)[-5:][::-1]
@@ -1224,10 +1235,10 @@ class Households:
                     )
 
                 if np.sum(affordable_mask) > 0:
-                    # 모멘텀 + 프리미엄 가중 점수
+                    # 모멘텀 70% + 동적 프리미엄 30%
                     combined_score = np.where(
                         affordable_mask,
-                        price_trends + REGION_PRESTIGE * 0.15,  # 프리미엄 지역 가중
+                        price_trends * 0.7 + dynamic_prestige * 0.3,
                         -999
                     )
                     top_regions = np.argsort(combined_score)[-5:][::-1]

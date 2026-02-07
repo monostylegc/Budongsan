@@ -2,7 +2,7 @@
 
 import taichi as ti
 import numpy as np
-from .config import Config, NUM_REGIONS, ADJACENCY
+from .config import Config, NUM_REGIONS, ADJACENCY, REGION_PRESTIGE
 from .order_book import OrderBook
 
 
@@ -57,6 +57,10 @@ class Market:
         self.historical_avg_prices = np.zeros(NUM_REGIONS, dtype=np.float32)
         # 지역별 평균 소득 (가구 기반)
         self.region_avg_income = np.zeros(NUM_REGIONS, dtype=np.float32)
+
+        # === 동적 프리미엄 시스템 ===
+        self.dynamic_prestige = REGION_PRESTIGE.copy()  # 초기값 = 구조적 프리미엄
+        self.prestige_momentum = np.zeros(NUM_REGIONS, dtype=np.float32)
 
     def initialize(self):
         """초기화"""
@@ -149,12 +153,12 @@ class Market:
         # 공급 과잉 시 상승률 축소, 수요 과잉 시 유지
         base_appreciation = self.config.base_appreciation
 
-        # 지역별 기본 상승률 조정 (tier 기반)
+        # 지역별 기본 상승률 조정 (tier 기반, 프리미엄 지역 우위 반영)
         tier_multipliers = np.array([
-            1.3, 1.1, 1.0,  # 서울 (강남, 마용성, 기타서울) - 축소
-            1.0, 0.8, 0.6, 0.7,  # 수도권 (분당, 경기남부, 경기북부, 인천)
-            0.4, 0.3, 0.3, 0.35, 0.5,  # 지방광역시 (부산, 대구, 광주, 대전, 세종)
-            0.15,  # 기타지방
+            1.5, 1.3, 1.0,  # 서울 (강남, 마용성, 기타서울) - 상향
+            1.2, 0.7, 0.5, 0.6,  # 수도권 (분당, 경기남부, 경기북부, 인천)
+            0.3, 0.2, 0.2, 0.25, 0.4,  # 지방광역시 (부산, 대구, 광주, 대전, 세종) - 하향
+            0.1,  # 기타지방
         ], dtype=np.float32)
 
         # 수요/공급 균형에 따른 기본 상승률 조정
@@ -183,20 +187,46 @@ class Market:
 
         regional_appreciation = regional_appreciation + inflation_expectation * inflation_factor
 
-        # === 5. 가격 수준 피드백 (평균 회귀 경향) ===
-        # 평균 대비 과도하게 높은 가격은 상승 압력 감소
-        avg_price = np.mean(current_prices[current_prices > 0])
-        price_level_ratio = current_prices / (avg_price + 1e-6)
-        # 평균 2배 초과 시 상승 압력 50% 감소, 평균 0.5배 이하 시 상승 압력 50% 증가
+        # === 5. 가격 수준 피드백 (역사적 자기 평균 대비 회귀) ===
+        # 변경: 전체 평균 대비 → 자기 지역 역사적 평균 대비
+        # 이유: 전체 평균 대비 비교는 고가 지역(강남 30억)을 구조적으로 억제하고
+        #       저가 지역(대구 4.7억)을 구조적으로 증폭시켜 비현실적 결과 초래
+        price_to_hist = np.divide(
+            current_prices, self.historical_avg_prices,
+            where=self.historical_avg_prices > 0,
+            out=np.ones_like(current_prices)
+        )
+        # 자기 역사적 평균 대비 이탈에 강하게 반응
+        # 10% 이상 올랐으면 억제 시작, 20% 이상이면 강하게 억제
+        # 계수 1.5: 10% 이탈 시 조정값 0.85 (15% 억제), 20% 이탈 시 0.7 (30% 억제)
         price_adjustment = np.where(
             current_prices > 0,
-            np.clip(1.5 - price_level_ratio * 0.5, 0.5, 1.5),
+            np.clip(1.15 - (price_to_hist - 1.0) * 1.5, 0.5, 1.15),
             1.0
+        )
+
+        # === 5.5. 동적 프리미엄 기반 가격 지지/억제 ===
+        # 프리미엄이 높은 지역: 하방 경직성 (가격 하락 저항) → "강남 불패"
+        # 프리미엄이 낮은 지역: 상방 억제 (저가 지역 과열 방지)
+        # 현실 근거: 프리미엄 지역은 희소성/브랜드/학군으로 가격 유지,
+        #           비프리미엄 지역은 대체재 풍부하여 수요 분산
+        prestige = self.dynamic_prestige
+        # 하락 시: 프리미엄 높을수록 하락 억제 (강남 85% 억제, 대구 30% 억제)
+        prestige_floor_factor = prestige * 0.85
+        # 상승 시: 프리미엄이 가격 상승 능력을 결정
+        # 강남(1.0): ds_change 100% 반영
+        # 대구(0.35): ds_change ~25% 반영 (비프리미엄 지역 상승 대폭 억제)
+        # 제곱 사용: 차이를 더 극적으로 만듦 (0.35² = 0.12 vs 1.0² = 1.0)
+        prestige_ceiling_factor = np.clip(prestige ** 1.5, 0.10, 1.0)
+        ds_change_supported = np.where(
+            ds_change < 0,
+            ds_change * (1.0 - prestige_floor_factor),
+            ds_change * prestige_ceiling_factor,
         )
 
         # === 6. 최종 가격 변화율 계산 ===
         # 수요/공급이 주요 동력, 기대와 풍선효과는 보조적
-        total_change = (ds_change * price_adjustment +
+        total_change = (ds_change_supported * price_adjustment +
                        regional_appreciation +
                        expectation_effect * 0.7 +  # 기대효과 축소
                        spillover * 0.5)  # 풍선효과 축소
@@ -398,6 +428,80 @@ class Market:
         attractiveness = expected_return - pir_penalty + liquidity_bonus
         attractiveness = np.clip(attractiveness, -0.3, 0.3)
         self.investment_attractiveness.from_numpy(attractiveness.astype(np.float32))
+
+    def update_dynamic_prestige(self, households):
+        """동적 프리미엄 업데이트 (매 스텝 호출)
+
+        구조적 프리미엄(REGION_PRESTIGE)에 3가지 동적 요소를 가산:
+        1. 학군 프리미엄: 학령기 자녀 밀집도
+        2. 명성 모멘텀: 가격 추세 누적 (강남 불패 심리)
+        3. 고소득 집중도: 젠트리피케이션 효과
+        """
+        dp_cfg = self.config.dynamic_prestige
+
+        regions = households.region.to_numpy()
+        child_ages = households.eldest_child_age.to_numpy()
+        num_children = households.num_children.to_numpy()
+        incomes = households.income.to_numpy()
+
+        # --- 1. 학군 프리미엄 (학령기 자녀 밀집도) ---
+        school_age_count = np.zeros(NUM_REGIONS, dtype=np.float32)
+        total_count = np.zeros(NUM_REGIONS, dtype=np.float32)
+
+        for r in range(NUM_REGIONS):
+            mask = regions == r
+            total_count[r] = np.sum(mask)
+            if total_count[r] > 0:
+                # 학령기 자녀가 있는 가구 비율
+                has_school_child = (
+                    (num_children[mask] > 0) &
+                    (child_ages[mask] >= dp_cfg.school_age_min) &
+                    (child_ages[mask] <= dp_cfg.school_age_max)
+                )
+                school_age_count[r] = np.sum(has_school_child)
+
+        school_age_ratio = np.divide(
+            school_age_count, total_count,
+            where=total_count > 0, out=np.zeros_like(school_age_count)
+        )
+        avg_school_ratio = np.mean(school_age_ratio[total_count > 0]) if np.any(total_count > 0) else 0.0
+        school_premium = np.clip(
+            (school_age_ratio - avg_school_ratio) * dp_cfg.school_premium_weight,
+            dp_cfg.school_premium_min, dp_cfg.school_premium_max
+        )
+
+        # --- 2. 명성 모멘텀 (가격 추세 누적) ---
+        price_changes = self.region_price_changes.to_numpy()
+        # 지수이동평균: 기존 상승이 계속 영향 (감쇠하면서)
+        self.prestige_momentum = (
+            dp_cfg.momentum_decay * self.prestige_momentum +
+            (1.0 - dp_cfg.momentum_decay) * price_changes * dp_cfg.momentum_sensitivity
+        )
+        momentum_premium = np.clip(
+            self.prestige_momentum,
+            dp_cfg.momentum_premium_min, dp_cfg.momentum_premium_max
+        )
+
+        # --- 3. 고소득 집중도 (젠트리피케이션) ---
+        high_income_threshold = np.percentile(incomes, dp_cfg.high_income_percentile)
+        high_income_ratio = np.zeros(NUM_REGIONS, dtype=np.float32)
+
+        for r in range(NUM_REGIONS):
+            mask = regions == r
+            if np.sum(mask) > 0:
+                high_income_ratio[r] = np.mean(incomes[mask] >= high_income_threshold)
+
+        avg_high_ratio = np.mean(high_income_ratio[total_count > 0]) if np.any(total_count > 0) else 0.2
+        concentration_premium = np.clip(
+            (high_income_ratio / (avg_high_ratio + 1e-6) - 1.0) * dp_cfg.concentration_weight,
+            dp_cfg.concentration_premium_min, dp_cfg.concentration_premium_max
+        )
+
+        # --- 최종 동적 프리미엄 ---
+        self.dynamic_prestige = np.clip(
+            REGION_PRESTIGE + school_premium + momentum_premium + concentration_premium,
+            0.0, 1.5
+        ).astype(np.float32)
 
     def get_region_metrics(self) -> dict:
         """지역별 지표 반환 (디버깅/분석용)"""

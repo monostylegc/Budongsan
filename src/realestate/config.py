@@ -124,6 +124,35 @@ REGION_HOUSEHOLD_RATIO = np.array([
 
 
 @dataclass
+class DynamicPrestigeConfig:
+    """동적 프리미엄 파라미터 설정
+
+    프리미엄 = 구조적(REGION_PRESTIGE, 고정) + 동적(매 스텝 업데이트)
+    동적 요소: 학군, 명성 모멘텀, 고소득 집중도
+    """
+    # 학군 프리미엄 (학령기 자녀 밀집도 기반)
+    school_premium_weight: float = 2.0       # 학군 영향 가중치
+    school_age_min: int = 6                  # 학령기 최소 나이
+    school_age_max: int = 18                 # 학령기 최대 나이
+
+    # 명성 모멘텀 (가격 추세 기반, "강남 불패" 심리)
+    momentum_decay: float = 0.95             # 모멘텀 감쇠율 (높을수록 오래 지속)
+    momentum_sensitivity: float = 5.0        # 가격 변화 → 모멘텀 변환 계수
+
+    # 고소득 집중도 (젠트리피케이션)
+    concentration_weight: float = 0.15       # 고소득 집중 영향 가중치
+    high_income_percentile: float = 80.0     # 고소득 기준 백분위
+
+    # 클리핑 범위
+    school_premium_min: float = -0.1
+    school_premium_max: float = 0.2
+    momentum_premium_min: float = -0.15
+    momentum_premium_max: float = 0.15
+    concentration_premium_min: float = -0.1
+    concentration_premium_max: float = 0.15
+
+
+@dataclass
 class AffordabilityConfig:
     """affordability (구매력) 설정 - DSR 기반 통일 체계
 
@@ -598,6 +627,9 @@ class Config:
 
     # 일자리 시장 설정
     job_market: JobMarketConfig = field(default_factory=JobMarketConfig)
+
+    # 동적 프리미엄 설정
+    dynamic_prestige: DynamicPrestigeConfig = field(default_factory=DynamicPrestigeConfig)
 
     # 시장 파라미터
     # 수정 (2024): 수요/공급 불균형이 가격에 더 강하게 반영되도록 조정

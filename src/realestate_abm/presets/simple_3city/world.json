@@ -1,0 +1,63 @@
+{
+  "name": "3도시 테스트",
+  "currency_unit": "만원",
+  "max_commute_km": 30,
+  "adjacency_decay": 0.05,
+  "industries": {
+    "service": {"income_multiplier": 1.0, "gdp_sensitivity": 1.0, "base_unemployment": 0.05},
+    "manufacturing": {"income_multiplier": 0.9, "gdp_sensitivity": 1.2, "base_unemployment": 0.06}
+  },
+  "regions": [
+    {
+      "id": "city_a",
+      "name": "도시A (프리미엄)",
+      "x": 0.0,
+      "y": 0.0,
+      "tier": 1,
+      "base_price": 100000,
+      "population": 500000,
+      "housing_stock": 250000,
+      "prestige": 0.9,
+      "job_density": 0.8,
+      "supply_elasticity": 0.5,
+      "industry_mix": {"service": 0.6, "manufacturing": 0.4},
+      "income_premium": 1.3,
+      "amenities": {"school": 0.9, "transport": 0.9},
+      "household_ratio": 0.33
+    },
+    {
+      "id": "city_b",
+      "name": "도시B (표준)",
+      "x": 20.0,
+      "y": 0.0,
+      "tier": 2,
+      "base_price": 50000,
+      "population": 300000,
+      "housing_stock": 150000,
+      "prestige": 0.5,
+      "job_density": 0.5,
+      "supply_elasticity": 1.0,
+      "industry_mix": {"service": 0.5, "manufacturing": 0.5},
+      "income_premium": 1.0,
+      "amenities": {"school": 0.6, "transport": 0.7},
+      "household_ratio": 0.33
+    },
+    {
+      "id": "city_c",
+      "name": "도시C (외곽)",
+      "x": 50.0,
+      "y": 0.0,
+      "tier": 3,
+      "base_price": 25000,
+      "population": 200000,
+      "housing_stock": 100000,
+      "prestige": 0.2,
+      "job_density": 0.2,
+      "supply_elasticity": 2.0,
+      "industry_mix": {"service": 0.3, "manufacturing": 0.7},
+      "income_premium": 0.8,
+      "amenities": {"school": 0.4, "transport": 0.4},
+      "household_ratio": 0.34
+    }
+  ]
+}

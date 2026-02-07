@@ -1,0 +1,52 @@
+{
+  "simulation": {
+    "name": "한국 2024",
+    "num_households": 100000,
+    "num_steps": 120,
+    "seed": 42,
+    "world_file": "world.json",
+    "institutions_file": "institutions.json",
+    "agents_file": "agents.json"
+  },
+  "labor": {
+    "unemployment_insurance_rate": 0.60,
+    "unemployment_insurance_months": 6,
+    "base_job_creation_rate": 0.02,
+    "base_job_destruction_rate": 0.015,
+    "reemployment_base_prob": 0.15,
+    "reemployment_age_penalty": 0.005,
+    "forced_sale_months": 12,
+    "min_living_cost": 200.0,
+    "income_growth_employed": 0.003
+  },
+  "macro": {
+    "gdp_growth_mean": 0.025,
+    "gdp_growth_persistence": 0.8,
+    "gdp_growth_volatility": 0.01,
+    "income_gdp_beta": 0.8,
+    "initial_inflation": 0.02,
+    "initial_gdp_growth": 0.025
+  },
+  "supply": {
+    "base_supply_rate": 0.001,
+    "price_threshold": 0.05,
+    "redevelopment_age_threshold": 30,
+    "redevelopment_price_threshold": 0.30,
+    "construction_period": 24,
+    "max_construction_ratio": 0.02,
+    "depreciation_rate": 0.003,
+    "min_condition": 0.3,
+    "demolition_threshold": 0.35,
+    "disaster_rate": 0.0001
+  },
+  "market": {
+    "price_sensitivity": 0.008,
+    "expectation_weight": 0.010,
+    "base_appreciation": 0.0015,
+    "spillover_rate": 0.005,
+    "buy_threshold": 0.08,
+    "sell_threshold": 0.12,
+    "use_double_auction": false,
+    "max_orders": 100000
+  }
+}

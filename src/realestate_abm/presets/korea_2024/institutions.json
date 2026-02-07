@@ -1,0 +1,55 @@
+{
+  "tax": {
+    "acquisition_tax": [
+      {"house_count_min": 1, "house_count_max": 1, "rate": 0.01},
+      {"house_count_min": 2, "house_count_max": 2, "rate": 0.08},
+      {"house_count_min": 3, "house_count_max": 999, "rate": 0.12}
+    ],
+    "transfer_tax_short": 0.70,
+    "transfer_tax_long": 0.40,
+    "transfer_tax_multi_short": 0.75,
+    "transfer_tax_multi_long": 0.60,
+    "jongbu_threshold_1house": 110000,
+    "jongbu_threshold_multi": 60000,
+    "jongbu_rate": 0.02
+  },
+  "lending": {
+    "ltv_rules": [
+      {"house_count": 0, "ltv": 0.70},
+      {"house_count": 1, "ltv": 0.50},
+      {"house_count": 2, "ltv": 0.00},
+      {"house_count": 3, "ltv": 0.00}
+    ],
+    "dsr_limit": 0.40,
+    "dti_limit": 0.40
+  },
+  "monetary": {
+    "interest_rate": 0.035,
+    "mortgage_spread": 0.015,
+    "neutral_real_rate": 0.02,
+    "inflation_target": 0.02,
+    "alpha_inflation": 1.5,
+    "alpha_output": 0.5
+  },
+  "rental": {
+    "jeonse_loan_limit": 50000,
+    "rent_increase_cap": 0.05,
+    "jeonse_ratio": 0.55,
+    "conversion_rate": 0.05
+  },
+  "affordability": {
+    "dsr_limit_end_user": 0.35,
+    "dsr_limit_investor": 0.40,
+    "dsr_limit_speculator": 0.45,
+    "wealthy_asset_utilization": 0.7,
+    "normal_asset_utilization": 0.5,
+    "homeless_asset_utilization": 0.85,
+    "wealthy_percentile": 90.0,
+    "parent_support_rate": 0.6,
+    "parent_support_mean": 25000.0,
+    "parent_support_std": 12000.0,
+    "parent_support_age_max": 40,
+    "loan_term_years": 30
+  },
+  "policy_timeline": []
+}

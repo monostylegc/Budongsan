@@ -1,0 +1,9 @@
+{
+  "simulation": {
+    "name": "3도시 테스트",
+    "num_households": 10000,
+    "num_steps": 24,
+    "seed": 123,
+    "world_file": "world.json"
+  }
+}

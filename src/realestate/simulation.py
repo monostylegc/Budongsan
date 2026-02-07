@@ -220,6 +220,10 @@ class Simulation:
         # === Phase 4: 가격 적정성 지표 업데이트 ===
         self.market.update_price_metrics(self.households)
 
+        # === Phase 4.5: 동적 프리미엄 업데이트 ===
+        # 학군, 명성 모멘텀, 고소득 집중도를 반영한 동적 프리미엄 계산
+        self.market.update_dynamic_prestige(self.households)
+
         # === Phase 5: 지역 선택 (동적 job_density 사용) ===
         dynamic_density = self.job_market.get_dynamic_job_density()
         self.households.select_target_regions(

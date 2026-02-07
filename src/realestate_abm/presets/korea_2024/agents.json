@@ -1,0 +1,120 @@
+{
+  "composition": {
+    "investor_ratio": 0.15,
+    "speculator_ratio": 0.05,
+    "initial_homeless_rate": 0.43,
+    "initial_one_house_rate": 0.42,
+    "income_median": 400.0,
+    "income_sigma": 0.65,
+    "asset_median": 30000.0,
+    "asset_alpha": 1.16,
+    "age_young_ratio": 0.45,
+    "age_middle_ratio": 0.43,
+    "age_senior_ratio": 0.12,
+    "personality": {
+      "risk_tolerance_alpha": 2.0,
+      "risk_tolerance_beta": 5.0,
+      "patience_mean": 0.5,
+      "patience_std": 0.15,
+      "social_conformity_alpha": 2.0,
+      "social_conformity_beta": 3.0,
+      "analytical_tendency_mean": 0.5,
+      "analytical_tendency_std": 0.2,
+      "fomo_sensitivity_alpha": 3.0,
+      "fomo_sensitivity_beta": 3.0
+    }
+  },
+  "lifecycle": {
+    "marriage_urgency_age_start": 28,
+    "marriage_urgency_age_end": 35,
+    "newlywed_housing_pressure": 1.5,
+    "parenting_housing_pressure": 1.3,
+    "school_transition_age_start": 10,
+    "school_transition_age_end": 15,
+    "school_district_premium": 1.2,
+    "retirement_start_age": 55,
+    "downsizing_probability": 0.1
+  },
+  "behavioral": {
+    "fomo_trigger_threshold": 0.05,
+    "fomo_intensity": 50.0,
+    "loss_aversion_mean": 2.5,
+    "loss_aversion_std": 0.35,
+    "herding_trigger": 0.03,
+    "herding_intensity": 10.0,
+    "social_learning_rate": 0.1,
+    "news_impact": 0.2
+  },
+  "prospect_theory": {
+    "alpha": 0.88,
+    "beta": 0.88,
+    "lambda_general": 2.25,
+    "lambda_realestate": 2.5,
+    "gamma_gain": 0.61,
+    "gamma_loss": 0.69,
+    "reference_point_decay": 0.008
+  },
+  "discounting": {
+    "beta_mean": 0.7,
+    "beta_std": 0.1,
+    "delta_mean": 0.99,
+    "delta_std": 0.005,
+    "investment_horizon": 60
+  },
+  "network": {
+    "avg_neighbors": 10,
+    "rewiring_prob": 0.1,
+    "max_neighbors": 20,
+    "self_weight": 0.6,
+    "neighbor_weight": 0.4,
+    "cascade_threshold": 0.3,
+    "cascade_multiplier": 2.0
+  },
+  "cognitive": {
+    "perception": {
+      "own_region_noise": 0.02,
+      "own_region_delay": 1,
+      "search_regions_max": 5,
+      "search_fatigue_rate": 0.1,
+      "neighbor_noise_add": 0.05,
+      "media_noise": 0.10,
+      "info_decay_months": 6,
+      "info_decay_rate": 0.15
+    },
+    "emotion": {
+      "anxiety_base_homeless": 0.02,
+      "anxiety_price_sensitivity": 0.5,
+      "anxiety_decay": 0.05,
+      "fomo_accumulation_rate": 0.03,
+      "fomo_decay_rate": 0.02,
+      "regret_learning_rate": 0.1,
+      "satisfaction_base_owner": 0.6,
+      "emotion_decision_threshold": 0.7
+    },
+    "thinking": {
+      "system1_weight_calm": 0.3,
+      "system1_weight_anxious": 0.8,
+      "anchoring_strength": 0.5,
+      "status_quo_bias_mean": 0.5,
+      "status_quo_bias_std": 0.15,
+      "mental_accounting_emergency_ratio": 0.20,
+      "mental_accounting_housing_ratio_homeless": 0.50,
+      "mental_accounting_housing_ratio_owner": 0.20
+    },
+    "decision": {
+      "trigger_price_change": 0.05,
+      "trigger_social_ratio": 0.30,
+      "trigger_anxiety_threshold": 0.7,
+      "trigger_fomo_threshold": 0.8,
+      "trigger_homeless_months": 24,
+      "trigger_random_search_prob": 0.05,
+      "satisficing_base_threshold": 0.6,
+      "delay_patience_weight": 0.5
+    },
+    "memory": {
+      "max_decisions": 10,
+      "experience_learning_rate": 0.05,
+      "info_quality_growth": 0.01
+    }
+  }
+}
